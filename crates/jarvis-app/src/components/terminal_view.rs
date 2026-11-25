@@ -11,6 +11,7 @@ pub fn TerminalView() -> Element {
     let mut drawer_open = use_signal(|| false);
     let mut scroll_offset = use_signal(|| 0usize);
     let mut composing = use_signal(|| false);
+    let mut last_comp = use_signal(|| Option::<(String, std::time::Instant)>::None);
     let mut active_tab_id = use_signal(|| Option::<String>::None);
 
     let _rev = ctx.ui_state.read().pty_rev;
@@ -56,7 +57,9 @@ pub fn TerminalView() -> Element {
     let show_drawer = is_drawer_open || !pending_approvals.is_empty();
     let approval_count = pending_approvals.len();
 
-    let render_span = |span: &StyledSpan, key_idx: usize| {
+    let show_cursor = *scroll_offset.read() == 0;
+
+    let render_span = move |span: &StyledSpan, key_idx: usize| {
         let fg = &span.fg_css;
         let bg = span.bg_css.as_deref().unwrap_or("transparent");
         let mut style_str = format!("color: {}; background-color: {};", fg, bg);
@@ -71,6 +74,22 @@ pub fn TerminalView() -> Element {
         }
         if span.dim {
             style_str.push_str(" opacity: 0.6;");
+        }
+
+        if show_cursor {
+            if let Some(c_idx) = span.has_cursor {
+                let text_chars: Vec<char> = span.text.chars().collect();
+                let before: String = text_chars.iter().take(c_idx).collect();
+                let cursor_ch = text_chars.get(c_idx).copied().unwrap_or(' ');
+                let after: String = text_chars.iter().skip(c_idx + 1).collect();
+                return rsx! {
+                    span { key: "{key_idx}", style: "{style_str}",
+                        "{before}"
+                        span { class: "pty-cursor", "{cursor_ch}" }
+                        "{after}"
+                    }
+                };
+            }
         }
 
         rsx! {
@@ -113,7 +132,7 @@ pub fn TerminalView() -> Element {
                                         style: "padding: 2px; font-size: 10px; margin-left: 4px;",
                                         onclick: move |e: MouseEvent| {
                                             e.stop_propagation();
-                                            pty_m_close.close_tab(&tid_close);
+                                            let _ = pty_m_close.close_tab(&tid_close);
                                             let remaining = pty_m_close.list_tabs();
                                             act_signal_close.set(remaining.first().map(|t| t.tab_id.clone()));
                                         },
@@ -217,14 +236,11 @@ pub fn TerminalView() -> Element {
                     onclick: move |_| {
                         let _ = document::eval("document.getElementById('pty-ime-input')?.focus();");
                     },
-                    onwheel: move |_evt| {
-                        let mut current = *scroll_offset.read();
-                        current = current.saturating_add(1);
-                        if current > snap.scrollback_len {
-                            current = snap.scrollback_len;
-                        }
-                        scroll_offset.set(current);
-                    },
+                                    onwheel: move |_evt: WheelEvent| {
+                                        let current = *scroll_offset.read();
+                                        let next = current.saturating_add(3).min(snap.scrollback_len);
+                                        scroll_offset.set(next);
+                                    },
                     // Rows rendering
                     div {
                         class: "scroll-y",
@@ -247,6 +263,23 @@ pub fn TerminalView() -> Element {
                         }
                     }
 
+                    if *scroll_offset.read() > 0 {
+                        {
+                            let offset = *scroll_offset.read();
+                            rsx! {
+                                button {
+                                    class: "hud-btn",
+                                    style: "position: absolute; right: 12px; bottom: 10px; z-index: 5;",
+                                    onclick: move |e: MouseEvent| {
+                                        e.stop_propagation();
+                                        scroll_offset.set(0);
+                                    },
+                                    "↓ Về cuối (-{offset})"
+                                }
+                            }
+                        }
+                    }
+
                     // Hidden uncontrolled textarea for Vietnamese IME support & keyboard events
                     textarea {
                         id: "pty-ime-input",
@@ -255,18 +288,50 @@ pub fn TerminalView() -> Element {
                         oncompositionstart: move |_| {
                             composing.set(true);
                         },
-                        oncompositionend: move |_| {
-                            composing.set(false);
+                        oncompositionend: {
+                            let pm = pty_manager.clone();
+                            let aid = active_id.clone();
+                            move |evt: Event<CompositionData>| {
+                                composing.set(false);
+                                let text = evt.data();
+                                let s = text.data().clone();
+                                if !s.is_empty() {
+                                    let _ = pm.write_input(&aid, s.as_bytes());
+                                    scroll_offset.set(0);
+                                    last_comp.set(Some((s, std::time::Instant::now())));
+                                    clear_dom_input("pty-ime-input", true);
+                                }
+                            }
                         },
                         oninput: {
                             let pm = pty_manager.clone();
                             let aid = active_id.clone();
                             move |evt: Event<FormData>| {
-                                if !*composing.read() {
-                                    let val = evt.value();
-                                    if !val.is_empty() {
+                                if *composing.read() {
+                                    return;
+                                }
+                                let val = evt.value();
+                                let should_clear = {
+                                    let guard = last_comp.read();
+                                    if let Some((prev, ts)) = guard.as_ref() {
+                                        ts.elapsed().as_millis() < 80 && val == *prev
+                                    } else {
+                                        false
+                                    }
+                                };
+                                if should_clear {
+                                    last_comp.set(None);
+                                    clear_dom_input("pty-ime-input", true);
+                                    return;
+                                }
+                                if !val.is_empty() {
+                                    if snap.bracketed_paste && (val.contains('\n') || val.contains('\r')) {
+                                        let pasted = format!("\x1b[200~{}\x1b[201~", val);
+                                        let _ = pm.write_input(&aid, pasted.as_bytes());
+                                    } else {
                                         let _ = pm.write_input(&aid, val.as_bytes());
                                     }
+                                    scroll_offset.set(0);
                                     clear_dom_input("pty-ime-input", true);
                                 }
                             }
@@ -306,16 +371,15 @@ pub fn TerminalView() -> Element {
                                     Key::Delete => bytes = Some(b"\x1b[3~".to_vec()),
                                     _ => {
                                         let modifiers = evt.modifiers();
-                                        let k_str = format!("{:?}", key);
-                                        if modifiers.ctrl() {
-                                            if k_str == "c" || k_str == "C" {
-                                                bytes = Some(vec![0x03]);
-                                            } else if k_str == "d" || k_str == "D" {
-                                                bytes = Some(vec![0x04]);
-                                            } else if k_str == "l" || k_str == "L" {
-                                                bytes = Some(vec![0x0c]);
-                                            } else if k_str == "z" || k_str == "Z" {
-                                                bytes = Some(vec![0x1a]);
+                                        if modifiers.ctrl() && !modifiers.alt() {
+                                            if let Key::Character(ref ch) = key {
+                                                match ch.as_str() {
+                                                    "c" | "C" => bytes = Some(vec![0x03]),
+                                                    "d" | "D" => bytes = Some(vec![0x04]),
+                                                    "l" | "L" => bytes = Some(vec![0x0c]),
+                                                    "z" | "Z" => bytes = Some(vec![0x1a]),
+                                                    _ => {}
+                                                }
                                             }
                                         }
                                     }
@@ -324,6 +388,7 @@ pub fn TerminalView() -> Element {
                                 if let Some(b) = bytes {
                                     evt.prevent_default();
                                     let _ = pm.write_input(&aid, &b);
+                                    scroll_offset.set(0);
                                     clear_dom_input("pty-ime-input", true);
                                 }
                             }
