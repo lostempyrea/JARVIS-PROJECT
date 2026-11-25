@@ -22,10 +22,45 @@ pub struct AgyCliBridge {
     full_auto_mode: bool,
 }
 
+pub const AGY_FALLBACK_MODELS: &[&str] = &[
+    "gemini-4-hydrogen-high",
+    "gemini-4-hydrogen-medium",
+    "gemini-4-hydrogen-low",
+    "gemini-3.8-flash-low",
+];
+
+pub fn resolve_agy_executable() -> PathBuf {
+    if let Some(bin) = crate::binary_manager::locate_binary("agy", None) {
+        return bin;
+    }
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        let base = PathBuf::from(local_app_data);
+        let candidate1 = base.join("agy").join("bin").join("agy.exe");
+        if candidate1.is_file() {
+            return candidate1;
+        }
+        let candidate2 = base.join("Programs").join("Antigravity").join("bin").join("agy.cmd");
+        if candidate2.is_file() {
+            return candidate2;
+        }
+    }
+    PathBuf::from("agy")
+}
+
+pub fn is_quota_error(msg: &str) -> bool {
+    let lower = msg.to_lowercase();
+    lower.contains("quota reached")
+        || lower.contains("individual quota")
+        || lower.contains("resource_exhausted")
+        || lower.contains("429")
+        || lower.contains("rate limit")
+        || lower.contains("exhausted")
+}
+
 impl AgyCliBridge {
     pub fn new(working_dir: impl Into<PathBuf>, effort: impl Into<String>, full_auto_mode: bool) -> Self {
         Self {
-            executable: PathBuf::from("agy"),
+            executable: resolve_agy_executable(),
             working_dir: working_dir.into(),
             effort: effort.into(),
             full_auto_mode,
@@ -491,6 +526,15 @@ mod tests {
                 StreamEvent::Done
             ]
         );
+    }
+
+    #[test]
+    fn is_quota_error_detects_individual_quota_reached() {
+        let msg = "Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 1h7m53s.";
+        assert!(is_quota_error(msg));
+        assert!(is_quota_error("Resource_Exhausted: rate limit exceeded"));
+        assert!(is_quota_error("Error 429 Too Many Requests"));
+        assert!(!is_quota_error("Everything is fine"));
     }
 
     #[test]

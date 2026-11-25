@@ -119,27 +119,22 @@ impl Tool for AgyDelegateTool {
             .or_else(|| ctx.agy_model.clone())
             .unwrap_or_default();
 
-        let cfg_flag = self
-            .config
-            .as_ref()
-            .and_then(|c| c.read().ok().map(|cfg| cfg.agy_use_windows_powershell))
-            .unwrap_or(false);
+        let is_interactive = parsed.interactive_window == Some(true)
+            || (parsed.prompt.trim().is_empty() && parsed.interactive_window.is_none());
 
-        let is_chat_channel = ctx.session_id.starts_with("telegram-") || ctx.session_id.starts_with("discord-");
-        let use_interactive = parsed
-            .interactive_window
-            .unwrap_or(cfg_flag && !is_chat_channel);
-
-        if use_interactive {
+        if is_interactive {
             if let Some(pty) = &self.pty {
                 let prompt_opt = if parsed.prompt.trim().is_empty() {
                     None
                 } else {
                     Some(parsed.prompt.as_str())
                 };
-                match pty.spawn_agy_tab(
+                match pty.spawn_agy_tab_with_options(
                     prompt_opt,
-                    Some(target_dir.to_str().unwrap_or(".")),
+                    Some(model.as_str()),
+                    Some(&effort),
+                    ctx.full_auto_mode,
+                    target_dir.to_str(),
                     120,
                     30,
                 ) {
@@ -149,7 +144,7 @@ impl Tool for AgyDelegateTool {
                             stream: "agy".to_string(),
                             line: format!("Spawned embedded AGY ConPTY tab {tab_id} for target: {}", target_dir.display()),
                         });
-                        return Ok(ToolResult::ok("Opened AGY CLI interactively in embedded ConPTY tab."));
+                        return Ok(ToolResult::ok(format!("Opened interactive AGY ConPTY tab ({tab_id}) in JARVIS HUD Terminal.")));
                     }
                     Err(e) => {
                         return Ok(ToolResult::err(format!(
@@ -159,41 +154,53 @@ impl Tool for AgyDelegateTool {
                 }
             }
 
-            let prompt_opt = if parsed.prompt.trim().is_empty() {
-                None
-            } else {
-                Some(parsed.prompt.as_str())
-            };
-            match launch_agy_in_windows_powershell(
-                &target_dir,
-                prompt_opt,
-                &model,
-                &effort,
-                ctx.full_auto_mode,
-                false,
-            ) {
-                Ok(_child) => {
-                    ctx.event_bus.publish(CoreEvent::TerminalLine {
-                        session_id: ctx.session_id.clone(),
-                        stream: "agy".to_string(),
-                        line: format!("Opened AGY CLI interactively in Windows PowerShell for target: {}", target_dir.display()),
-                    });
-                    return Ok(ToolResult::ok("Opened AGY CLI interactively in Windows PowerShell."));
-                }
-                Err(e) => {
-                    return Ok(ToolResult::err(format!(
-                        "Failed to launch interactive AGY in Windows PowerShell: {e}"
-                    )));
+            let cfg_flag = self
+                .config
+                .as_ref()
+                .and_then(|c| c.read().ok().map(|cfg| cfg.agy_use_windows_powershell))
+                .unwrap_or(false);
+
+            let is_chat_channel = ctx.session_id.starts_with("telegram-") || ctx.session_id.starts_with("discord-");
+            if cfg_flag && !is_chat_channel {
+                let prompt_opt = if parsed.prompt.trim().is_empty() {
+                    None
+                } else {
+                    Some(parsed.prompt.as_str())
+                };
+                match launch_agy_in_windows_powershell(
+                    &target_dir,
+                    prompt_opt,
+                    &model,
+                    &effort,
+                    ctx.full_auto_mode,
+                    false,
+                ) {
+                    Ok(_child) => {
+                        ctx.event_bus.publish(CoreEvent::TerminalLine {
+                            session_id: ctx.session_id.clone(),
+                            stream: "agy".to_string(),
+                            line: format!("Opened AGY CLI interactively in Windows PowerShell for target: {}", target_dir.display()),
+                        });
+                        return Ok(ToolResult::ok("Opened AGY CLI interactively in Windows PowerShell."));
+                    }
+                    Err(e) => {
+                        return Ok(ToolResult::err(format!(
+                            "Failed to launch interactive AGY in Windows PowerShell: {e}"
+                        )));
+                    }
                 }
             }
         }
 
         let bridge = AgyCliBridge::new(target_dir, effort, ctx.full_auto_mode);
 
-        let mut rx = bridge
-            .run_prompt(&parsed.prompt, &model)
-            .await
-            .map_err(|e| ToolError::Execution(e.to_string()))?;
+        let current_model = model.clone();
+        let mut rx = match bridge.run_prompt(&parsed.prompt, &current_model).await {
+            Ok(r) => r,
+            Err(e) => {
+                return Err(ToolError::Execution(e.to_string()));
+            }
+        };
 
         let mut output = String::new();
         let mut errors = Vec::new();
@@ -222,6 +229,72 @@ impl Tool for AgyDelegateTool {
                     errors.push(err);
                 }
                 StreamEvent::Done => break,
+            }
+        }
+
+        let mut has_quota_error = errors.iter().any(|e| crate::providers::agy_cli::is_quota_error(e));
+        if !has_quota_error && errors.is_empty() && output.to_lowercase().contains("quota") {
+            has_quota_error = true;
+        }
+
+        if has_quota_error {
+            for fallback_model in crate::providers::agy_cli::AGY_FALLBACK_MODELS {
+                if fallback_model == &current_model {
+                    continue;
+                }
+                ctx.event_bus.publish(CoreEvent::TerminalLine {
+                    session_id: ctx.session_id.clone(),
+                    stream: "agy".to_string(),
+                    line: format!("Quota limit hit on model '{current_model}'. Falling back to '{fallback_model}'..."),
+                });
+
+                let mut fb_rx = match bridge.run_prompt(&parsed.prompt, fallback_model).await {
+                    Ok(r) => r,
+                    Err(_) => continue,
+                };
+
+                let mut fb_output = String::new();
+                let mut fb_errors = Vec::new();
+
+                while let Some(ev) = fb_rx.recv().await {
+                    match ev {
+                        StreamEvent::TextDelta(delta) => {
+                            ctx.event_bus.publish(CoreEvent::TerminalLine {
+                                session_id: ctx.session_id.clone(),
+                                stream: "agy".to_string(),
+                                line: delta.trim_end_matches('\n').to_string(),
+                            });
+                            fb_output.push_str(&delta);
+                        }
+                        StreamEvent::ToolProgress(msg) => {
+                            ctx.event_bus.publish(CoreEvent::TerminalLine {
+                                session_id: ctx.session_id.clone(),
+                                stream: "agy".to_string(),
+                                line: msg,
+                            });
+                        }
+                        StreamEvent::ToolCallComplete(tc) => {
+                            fb_output.push_str(&format!("\n[agy tool call: {}]", tc.name));
+                        }
+                        StreamEvent::Error(err) => {
+                            fb_errors.push(err);
+                        }
+                        StreamEvent::Done => break,
+                    }
+                }
+
+                let mut fb_has_quota = fb_errors.iter().any(|e| crate::providers::agy_cli::is_quota_error(e));
+                if !fb_has_quota && fb_errors.is_empty() && fb_output.to_lowercase().contains("quota") {
+                    fb_has_quota = true;
+                }
+
+                if !fb_has_quota && fb_errors.is_empty() {
+                    return Ok(ToolResult::ok(if fb_output.trim().is_empty() {
+                        "(agy sub-agent completed with no text output)".to_string()
+                    } else {
+                        fb_output
+                    }));
+                }
             }
         }
 

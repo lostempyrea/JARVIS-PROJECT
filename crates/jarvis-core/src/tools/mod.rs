@@ -5,6 +5,7 @@ pub mod fs_tools;
 pub mod memory_tool;
 pub mod powershell_console;
 pub mod pty_manager;
+pub mod pty_tool;
 pub mod terminal;
 pub mod vt_emulator;
 
