@@ -1,5 +1,6 @@
 # JARVIS-PROJECT
-Jarvis at your home
+Mom i want a jarvis
+But we have a jarvis at home
 
 ## Architecture
 - **jarvis-core**: Core engine handling cross-platform integrations, channels (Telegram, Discord, Voice/Groq), state management, and plugin architecture.
