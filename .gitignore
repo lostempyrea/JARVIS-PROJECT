@@ -1,0 +1,37 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Local databases & logs
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.log
+
+# Environment, secrets & local runtime config
+.env
+.env.*
+!.env.example
+config.toml
+*.pem
+*.key
+credentials.json
+token.json
+secrets.*
+
+# AI / Agent / IDE directories
+.agents/
+.agent/
+.gemini/
+.claude/
+.cursor/
+.codex/
+.windsurf/
+.aider*
+graphify-out/
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

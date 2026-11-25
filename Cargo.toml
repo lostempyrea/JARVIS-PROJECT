@@ -1,0 +1,65 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/jarvis-core",
+    "crates/jarvis-app",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+license = "MIT"
+
+[workspace.dependencies]
+# Core async & serialization
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+tokio-util = "0.7"
+futures = "0.3"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1.1"
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.11"
+regex = "1"
+dirs = "7"
+glob = "0.3"
+walkdir = "2"
+
+# Networking & HTTP
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "multipart"] }
+
+# Storage & Secrets
+rusqlite = { version = "0.40", features = ["bundled", "column_decltype"] }
+keyring = { version = "3", features = ["windows-native"] }
+
+# Channels & Voice (aligned with local Cargo cache for Phases 2-5)
+davey = "0.2"
+serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "rustls_backend", "model", "builder", "voice"] }
+teloxide = { version = "0.13", default-features = false, features = ["rustls", "macros"] }
+chacha20poly1305 = "0.10"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+base64 = "0.22"
+native-tls = "0.2"
+tokio-native-tls = "0.3"
+async-imap = { version = "0.11", default-features = false, features = ["runtime-tokio"] }
+mail-parser = "0.11"
+lettre = { version = "0.11", default-features = false, features = ["tokio1", "tokio1-native-tls", "smtp-transport", "builder"] }
+cpal = "0.15"
+rodio = "0.19"
+hound = "3.5"
+hex = "0.4"
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
