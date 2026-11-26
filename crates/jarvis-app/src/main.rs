@@ -13,7 +13,8 @@ use crate::components::standby_popup::StandbyPopupView;
 use crate::components::terminal_view::TerminalView;
 use crate::components::voice_panel::VoicePanelView;
 use crate::components::{
-    svg_collapse, svg_minimize, svg_orb, DashboardTab, HudUiState, JarvisUiContext,
+    svg_close, svg_collapse, svg_minimize, svg_orb, DashboardTab, HudUiState, JarvisUiContext,
+    UpdatePromptCard,
 };
 use crate::window_manager::{
     apply_window_mode, show_and_focus, PointerDragTracker, WindowMode, DASHBOARD_HEIGHT,
@@ -45,6 +46,7 @@ const HUD_CSS: &str = include_str!("../assets/hud.css");
 const TRAY_ID_TOGGLE: &str = "jarvis_tray_toggle";
 const TRAY_ID_DASHBOARD: &str = "jarvis_tray_dashboard";
 const TRAY_ID_ORB: &str = "jarvis_tray_orb";
+const TRAY_ID_CHECK_UPDATE: &str = "jarvis_tray_check_update";
 const TRAY_ID_QUIT: &str = "jarvis_tray_quit";
 
 #[derive(Clone)]
@@ -64,6 +66,7 @@ fn parse_env_window_mode(var_name: &str) -> Option<WindowMode> {
 }
 
 fn main() {
+    jarvis_core::updater::cleanup_stale_old_executable();
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
 
@@ -222,15 +225,27 @@ fn RootHudApp() -> Element {
 
     // Subscribe to CoreEvent broadcast stream.
     let core_events = core.clone();
+    let ctx_events = ctx.clone();
+    let desktop_events = desktop.clone();
     let mut ui_sig_events = ui_state;
     let session_sig_events = active_session_id;
     use_future(move || {
         let core = core_events.clone();
+        let mut ctx_events = ctx_events.clone();
+        let desktop_events = desktop_events.clone();
         async move {
             let mut rx = core.event_bus.subscribe();
             loop {
                 match rx.recv().await {
                     Ok(ev) => {
+                        if matches!(ev, CoreEvent::UpdateAvailable { .. })
+                            && (*ctx_events.window_mode.read() == WindowMode::StandbyOrb
+                                || !*ctx_events.hud_visible.read())
+                        {
+                            ctx_events.hud_visible.set(true);
+                            show_and_focus(&desktop_events);
+                            ctx_events.switch_mode(&desktop_events, WindowMode::StandbyPopup);
+                        }
                         let sid = session_sig_events.read().clone();
                         ui_sig_events.write().apply_core_event(ev, &sid);
                     }
@@ -239,6 +254,44 @@ fn RootHudApp() -> Element {
                         continue;
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        }
+    });
+
+    // Background auto-update check loop.
+    let core_upd = core.clone();
+    use_future(move || {
+        let core_upd = core_upd.clone();
+        async move {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let auto_check_enabled = core_upd
+                .config
+                .read()
+                .map(|c| c.updater.auto_check_enabled)
+                .unwrap_or(true);
+            if auto_check_enabled {
+                let _ = core_upd.updater.check_for_update(false).await;
+            }
+            let mut elapsed_mins: u64 = 0;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                elapsed_mins = elapsed_mins.saturating_add(1);
+                let (auto_check_enabled, interval_mins) = core_upd
+                    .config
+                    .read()
+                    .map(|c| {
+                        (
+                            c.updater.auto_check_enabled,
+                            c.updater.check_interval_minutes.max(5),
+                        )
+                    })
+                    .unwrap_or((true, 30));
+                if elapsed_mins >= interval_mins {
+                    elapsed_mins = 0;
+                    if auto_check_enabled {
+                        let _ = core_upd.updater.check_for_update(false).await;
+                    }
                 }
             }
         }
@@ -306,6 +359,36 @@ fn RootHudApp() -> Element {
             show_and_focus(&desktop_tray_menu);
             ctx_tray_menu.switch_mode(&desktop_tray_menu, WindowMode::StandbyOrb);
         }
+        TRAY_ID_CHECK_UPDATE => {
+            let mut ctx_check = ctx_tray_menu.clone();
+            let desktop_check = desktop_tray_menu.clone();
+            spawn(async move {
+                let reveal_if_hidden_or_orb = |ctx_r: &mut JarvisUiContext| {
+                    if *ctx_r.window_mode.read() == WindowMode::StandbyOrb
+                        || !*ctx_r.hud_visible.read()
+                    {
+                        ctx_r.hud_visible.set(true);
+                        show_and_focus(&desktop_check);
+                        ctx_r.switch_mode(&desktop_check, WindowMode::StandbyPopup);
+                    }
+                };
+                match ctx_check.core.updater.check_for_update(true).await {
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        ctx_check.ui_state.write().toast_banner = Some(format!(
+                            "JARVIS is up to date (v{}).",
+                            jarvis_core::updater::current_version()
+                        ));
+                        reveal_if_hidden_or_orb(&mut ctx_check);
+                    }
+                    Err(err) => {
+                        ctx_check.ui_state.write().toast_banner =
+                            Some(format!("Update check failed: {err}"));
+                        reveal_if_hidden_or_orb(&mut ctx_check);
+                    }
+                }
+            });
+        }
         TRAY_ID_QUIT => {
             core_quit.voice.stop();
             core_quit.music.local_player().shutdown();
@@ -367,6 +450,7 @@ fn ExpandedDashboardView() -> Element {
     let ui = ctx.ui_state.read();
     let reactor_state = ui.reactor_state;
     let state_label = reactor_state_label(reactor_state);
+    let toast = ui.toast_banner.clone();
     let mic_db = Some(ui.mic_db);
     let pending_count = ui.pending_approvals.len();
     drop(ui);
@@ -447,6 +531,23 @@ fn ExpandedDashboardView() -> Element {
             div { class: "dash-main",
                 IconRail {}
                 main { class: "dash-content",
+                    if let Some(banner) = toast {
+                        div { class: "toast-strip", style: "border-radius: 8px;",
+                            span { style: "overflow: hidden; text-overflow: ellipsis; white-space: nowrap;", "{banner}" }
+                            button {
+                                class: "icon-btn",
+                                style: "width: 22px; height: 22px;",
+                                "data-tooltip": "Dismiss",
+                                "data-tooltip-pos": "bottom-right",
+                                onclick: {
+                                    let mut c = ctx.clone();
+                                    move |_| c.ui_state.write().toast_banner = None
+                                },
+                                {svg_close()}
+                            }
+                        }
+                    }
+                    UpdatePromptCard {}
                     match tab {
                         DashboardTab::Chat => rsx! { ChatHudView {} },
                         DashboardTab::Terminal => rsx! { TerminalView {} },
@@ -550,6 +651,11 @@ fn spawn_background_services(core: Arc<AppState>, default_session_id: String) {
         }
     }
 
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        jarvis_core::updater::cleanup_stale_old_executable();
+    });
+
     tokio::spawn(async move {
         let outcomes = core.channels.start_all().await;
         for (channel, res) in outcomes {
@@ -565,12 +671,14 @@ fn setup_tray_icon() -> Option<TrayIcon> {
     let toggle_item = MenuItem::with_id(TRAY_ID_TOGGLE, "Show / Hide HUD", true, None);
     let dash_item = MenuItem::with_id(TRAY_ID_DASHBOARD, "Expanded Dashboard", true, None);
     let orb_item = MenuItem::with_id(TRAY_ID_ORB, "Standby Orb", true, None);
+    let check_update_item = MenuItem::with_id(TRAY_ID_CHECK_UPDATE, "Check for Updates", true, None);
     let quit_item = MenuItem::with_id(TRAY_ID_QUIT, "Quit", true, None);
 
     if let Err(err) = menu.append_items(&[
         &toggle_item,
         &dash_item,
         &orb_item,
+        &check_update_item,
         &PredefinedMenuItem::separator(),
         &quit_item,
     ]) {

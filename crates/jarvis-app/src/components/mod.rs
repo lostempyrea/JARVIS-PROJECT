@@ -18,7 +18,8 @@ use jarvis_core::db::Database;
 use jarvis_core::voice::VoicePipeline;
 use jarvis_core::{
     AppState, ApprovalDecision, ApprovalRequest, BinaryStatus, ChannelStatusInfo, CoreEvent,
-    MusicQueueSnapshot, MusicTarget, ParsedEmail, ReactorState, SessionRecord, UiCommand,
+    InstallMethod, MusicQueueSnapshot, MusicTarget, ParsedEmail, ReactorState, SessionRecord,
+    UiCommand, UpdateReleaseInfo,
 };
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
@@ -146,6 +147,9 @@ pub struct HudUiState {
     pub ptt_active: bool,
     pub last_transcript: Option<(String, bool)>,
     pub toast_banner: Option<String>,
+    pub available_update: Option<UpdateReleaseInfo>,
+    pub update_installing: bool,
+    pub update_progress_text: Option<String>,
     pub streaming_active: bool,
     pub unread_notifications: usize,
     pub pty_rev: u64,
@@ -192,6 +196,9 @@ impl HudUiState {
             ptt_active: false,
             last_transcript: None,
             toast_banner: None,
+            available_update: None,
+            update_installing: false,
+            update_progress_text: None,
             streaming_active: false,
             unread_notifications: 0,
             pty_rev: 0,
@@ -508,6 +515,32 @@ impl HudUiState {
                     _ => format!("{binary}: {status}"),
                 };
                 self.ffmpeg_install_status = Some(detail);
+            }
+            CoreEvent::UpdateAvailable { release, .. } => {
+                self.toast_banner = Some(format!("Update available: v{}", release.version));
+                self.available_update = Some(release);
+                if !self.update_installing {
+                    self.update_installing = false;
+                    self.update_progress_text = None;
+                }
+            }
+            CoreEvent::UpdateDownloadProgress {
+                version,
+                status,
+                bytes_downloaded,
+                total_bytes,
+            } => {
+                let detail = match total_bytes {
+                    Some(total) if total > 0 => {
+                        let pct = (bytes_downloaded.saturating_mul(100) / total).min(100);
+                        format!("Downloading v{version}: {status} ({pct}%)")
+                    }
+                    _ if bytes_downloaded > 0 => {
+                        format!("Downloading v{version}: {status} ({} KB)", bytes_downloaded / 1024)
+                    }
+                    _ => format!("Downloading v{version}: {status}"),
+                };
+                self.update_progress_text = Some(detail);
             }
             CoreEvent::MusicStateUpdated(snap) => match snap.target {
                 MusicTarget::Local => self.local_music = snap,
@@ -978,6 +1011,166 @@ pub fn MicPickerButton(#[props(default = "top-left")] tooltip_pos: &'static str)
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+async fn install_update_inner(
+    ctx: &mut JarvisUiContext,
+    release: &UpdateReleaseInfo,
+) -> Result<(), String> {
+    let staged_path = ctx
+        .core
+        .updater
+        .download_and_verify(release)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    ctx.ui_state.write().update_progress_text =
+        Some("Verifying SHA-256 & applying update...".to_string());
+
+    let install_method = jarvis_core::updater::apply_staged_to_current_exe(&staged_path)
+        .map_err(|e| e.to_string())?;
+
+    ctx.core.voice.stop();
+    ctx.core.music.local_player().shutdown();
+    ctx.core.music.local_player().halt_active_stream().await;
+    ctx.core.channels.stop_all().await;
+    let _ = ctx.core.ps_console.shutdown().await;
+    ctx.core.pty.shutdown_all();
+
+    let start_mode_env = match *ctx.window_mode.read() {
+        WindowMode::ExpandedDashboard => "dashboard",
+        _ => "popup",
+    };
+
+    match install_method {
+        InstallMethod::InPlaceSwapped => {
+            let _ = std::fs::remove_file(&staged_path);
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            std::process::Command::new(exe)
+                .env("JARVIS_START_MODE", start_mode_env)
+                .spawn()
+                .map_err(|e| e.to_string())?;
+        }
+        InstallMethod::DeferredScript(ps1) => {
+            jarvis_core::binary_manager::hidden_std_command(std::path::Path::new(
+                "powershell.exe",
+            ))
+            .args([
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-WindowStyle",
+                "Hidden",
+                "-File",
+            ])
+            .arg(&ps1)
+            .env("JARVIS_START_MODE", start_mode_env)
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        }
+    }
+
+    std::process::exit(0);
+}
+
+pub fn trigger_install_update(mut ctx: JarvisUiContext, release: UpdateReleaseInfo) {
+    {
+        let mut ui = ctx.ui_state.write();
+        ui.update_installing = true;
+        ui.update_progress_text = Some(format!("Downloading v{}...", release.version));
+    }
+
+    dioxus::prelude::spawn(async move {
+        if let Err(err) = install_update_inner(&mut ctx, &release).await {
+            let mut ui = ctx.ui_state.write();
+            ui.update_installing = false;
+            ui.update_progress_text = None;
+            ui.toast_banner = Some(format!("Update failed: {err}"));
+        }
+    });
+}
+
+#[component]
+pub fn UpdatePromptCard() -> Element {
+    let ctx = use_context::<JarvisUiContext>();
+    let (available_update, update_installing, update_progress_text) = {
+        let ui = ctx.ui_state.read();
+        (
+            ui.available_update.clone(),
+            ui.update_installing,
+            ui.update_progress_text.clone(),
+        )
+    };
+
+    let Some(rel) = available_update else {
+        return rsx! {};
+    };
+
+    let current_ver = jarvis_core::updater::current_version();
+    let notes_text = if rel.notes.trim().is_empty() {
+        "New release available on GitHub.".to_string()
+    } else {
+        rel.notes.clone()
+    };
+    let progress_display =
+        update_progress_text.unwrap_or_else(|| "Installing update...".to_string());
+
+    rsx! {
+        div { class: "update-card",
+            div { class: "update-card-head",
+                span {
+                    style: "font-size: 12.5px; font-weight: 700; color: var(--cyan-neon);",
+                    "⬆ Update v{rel.version} Available"
+                }
+                span { class: "chip", "Current: v{current_ver}" }
+            }
+            div { class: "update-card-notes", "{notes_text}" }
+            if update_installing {
+                div {
+                    class: "muted",
+                    style: "color: var(--emerald); font-weight: 600;",
+                    "{progress_display}"
+                }
+            } else {
+                div { class: "update-card-actions",
+                    button {
+                        class: "hud-btn primary",
+                        onclick: {
+                            let c = ctx.clone();
+                            let r = rel.clone();
+                            move |_| trigger_install_update(c.clone(), r.clone())
+                        },
+                        "Update Now"
+                    }
+                    button {
+                        class: "hud-btn",
+                        onclick: {
+                            let mut c = ctx.clone();
+                            move |_| c.ui_state.write().available_update = None
+                        },
+                        "Later"
+                    }
+                    button {
+                        class: "hud-btn",
+                        onclick: {
+                            let mut c = ctx.clone();
+                            let ver = rel.version.clone();
+                            move |_| {
+                                if let Ok(mut cfg) = c.core.config.write() {
+                                    cfg.updater.skipped_version = Some(ver.clone());
+                                    let _ = cfg.save();
+                                }
+                                let mut ui = c.ui_state.write();
+                                ui.available_update = None;
+                                ui.toast_banner = Some(format!("Skipped update v{ver}"));
+                            }
+                        },
+                        "Skip Version"
                     }
                 }
             }
