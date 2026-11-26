@@ -103,7 +103,9 @@ fn main() {
 
     #[cfg(target_os = "windows")]
     {
-        win_builder = win_builder.with_undecorated_shadow(false);
+        win_builder = win_builder
+            .with_undecorated_shadow(false)
+            .with_skip_taskbar(start_mode == WindowMode::StandbyOrb);
     }
 
     if start_mode == WindowMode::StandbyOrb {
@@ -163,7 +165,9 @@ fn RootHudApp() -> Element {
         tx
     });
     // Sync initial UI state after spawn_background_services so voice_running reflects startup.
-    let ui_state = use_signal(|| HudUiState::from_core(&core, &initial_session));
+    let mut ui_state = HudUiState::from_core(&core, &initial_session);
+    ui_state.voice_running = core.voice.is_running();
+    let ui_state = use_signal(|| ui_state);
 
     let ctx = JarvisUiContext {
         core: core.clone(),
@@ -351,6 +355,14 @@ fn ExpandedDashboardView() -> Element {
     let desktop = use_window();
     let mut drag_tracker = use_signal(PointerDragTracker::default);
 
+    let mut clock_time = use_signal(|| chrono::Local::now().format("%H:%M:%S").to_string());
+    use_future(move || async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            clock_time.set(chrono::Local::now().format("%H:%M:%S").to_string());
+        }
+    });
+
     let tab = *ctx.active_tab.read();
     let ui = ctx.ui_state.read();
     let reactor_state = ui.reactor_state;
@@ -394,6 +406,7 @@ fn ExpandedDashboardView() -> Element {
                     ArcReactorOrb { state: reactor_state, size: 26, badge_count: 0, mic_db }
                     span { class: "dash-brand-text", "J.A.R.V.I.S. // COMMAND DECK" }
                     span { class: "dash-status-pill", "{state_label}" }
+                    span { class: "chip", "{clock_time}" }
                     if pending_count > 0 {
                         span { class: "chip", style: "border-color: var(--orange-alert); color: var(--amber);",
                             "{pending_count} Awaiting Approval"
@@ -455,24 +468,41 @@ fn spawn_core_command_loop(core: Arc<AppState>, mut rx: UnboundedReceiver<UiComm
         while let Some(cmd) = rx.recv().await {
             match cmd {
                 UiCommand::SubmitPrompt { session_id, prompt } => {
+                    if jarvis_core::voice::is_stop_speaking_command(&prompt) {
+                        core.voice.stop_speaking();
+                        core.event_bus.publish(CoreEvent::TurnComplete {
+                            session_id,
+                            full_text: "🔇 JARVIS muted.".to_string(),
+                        });
+                        core.event_bus.publish(CoreEvent::ReactorStateChanged {
+                            state: ReactorState::Idle,
+                        });
+                        continue;
+                    }
                     if let Some(prev) = active_turns.remove(&session_id) {
                         prev.abort();
                     }
+                    core.voice.stop_speaking();
                     let core_turn = core.clone();
                     let sid = session_id.clone();
                     let handle = tokio::spawn(async move {
-                        if let Err(err) = core_turn
+                        match core_turn
                             .agent
                             .handle_user_prompt(&sid, "hud", &prompt)
                             .await
                         {
-                            core_turn.event_bus.publish(CoreEvent::Error {
-                                session_id: Some(sid),
-                                message: err.to_string(),
-                            });
-                            core_turn.event_bus.publish(CoreEvent::ReactorStateChanged {
-                                state: ReactorState::Idle,
-                            });
+                            Ok(outcome) => {
+                                core_turn.voice.speak_reply(&outcome.final_text).await;
+                            }
+                            Err(err) => {
+                                core_turn.event_bus.publish(CoreEvent::Error {
+                                    session_id: Some(sid),
+                                    message: err.to_string(),
+                                });
+                                core_turn.event_bus.publish(CoreEvent::ReactorStateChanged {
+                                    state: ReactorState::Idle,
+                                });
+                            }
                         }
                     });
                     active_turns.insert(session_id, handle);
@@ -484,6 +514,8 @@ fn spawn_core_command_loop(core: Arc<AppState>, mut rx: UnboundedReceiver<UiComm
                     if let Some(handle) = active_turns.remove(&session_id) {
                         handle.abort();
                     }
+                    core.approval_broker.deny_all_for_session(&session_id);
+                    core.voice.stop_speaking();
                     core.event_bus.publish(CoreEvent::ReactorStateChanged {
                         state: ReactorState::Idle,
                     });

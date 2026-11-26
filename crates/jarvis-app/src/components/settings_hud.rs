@@ -127,12 +127,12 @@ pub fn SettingsHudView() -> Element {
                 Ok(()) => {
                     secret_rev.with_mut(|v| *v = v.wrapping_add(1));
                     save_banner.set(Some(format!(
-                        "{label} đã được lưu an toàn vào Windows Credential Manager."
+                        "{label} saved securely to Windows Credential Manager."
                     )));
                     true
                 }
                 Err(err) => {
-                    save_banner.set(Some(format!("Lỗi lưu credential ({label}): {err}")));
+                    save_banner.set(Some(format!("Failed to save credential ({label}): {err}")));
                     false
                 }
             }
@@ -146,10 +146,10 @@ pub fn SettingsHudView() -> Element {
                 Ok(()) => {
                     secret_rev.with_mut(|v| *v = v.wrapping_add(1));
                     save_banner.set(Some(format!(
-                        "Đã xóa {label} khỏi Windows Credential Manager."
+                        "Removed {label} from Windows Credential Manager."
                     )));
                 }
-                Err(err) => save_banner.set(Some(format!("Lỗi xóa credential ({label}): {err}"))),
+                Err(err) => save_banner.set(Some(format!("Failed to delete credential ({label}): {err}"))),
             }
         }
     };
@@ -216,10 +216,10 @@ pub fn SettingsHudView() -> Element {
                 }
                 match core_async.channels.start_channel("discord").await {
                     Ok(()) => {
-                        save_banner.set(Some("Discord Bot đã kết nối thành công.".to_string()));
+                        save_banner.set(Some("Discord Bot connected successfully.".to_string()));
                     }
                     Err(err) => {
-                        let msg = format!("Discord kết nối thất bại: {err}");
+                        let msg = format!("Discord connection failed: {err}");
                         save_banner.set(Some(msg.clone()));
                         ui_sig.write().toast_banner = Some(msg);
                     }
@@ -249,10 +249,10 @@ pub fn SettingsHudView() -> Element {
                 }
                 match core_async.channels.start_channel("telegram").await {
                     Ok(()) => {
-                        save_banner.set(Some("Telegram Bot đã kết nối thành công.".to_string()));
+                        save_banner.set(Some("Telegram Bot connected successfully.".to_string()));
                     }
                     Err(err) => {
-                        let msg = format!("Telegram kết nối thất bại: {err}");
+                        let msg = format!("Telegram connection failed: {err}");
                         save_banner.set(Some(msg.clone()));
                         ui_sig.write().toast_banner = Some(msg);
                     }
@@ -268,7 +268,7 @@ pub fn SettingsHudView() -> Element {
             let ids = parse_discord_user_ids_input(&raw);
             if ids.is_empty() {
                 save_banner.set(Some(
-                    "Vui lòng nhập Discord User ID hợp lệ (VD: 362150827776933888 hoặc @mention)."
+                    "Please enter a valid Discord User ID (e.g. 362150827776933888 or @mention)."
                         .to_string(),
                 ));
                 return;
@@ -283,7 +283,7 @@ pub fn SettingsHudView() -> Element {
             clear_dom_input("discord-add-user-input", true);
             whitelist_rev.with_mut(|v| *v = v.wrapping_add(1));
             save_banner.set(Some(format!(
-                "Đã thêm {count} Discord User ID vào danh sách cho phép."
+                "Added {count} Discord User ID(s) to whitelist."
             )));
         }
     };
@@ -295,7 +295,7 @@ pub fn SettingsHudView() -> Element {
             let ids = parse_telegram_chat_ids_input(&raw);
             if ids.is_empty() {
                 save_banner.set(Some(
-                    "Vui lòng nhập Telegram Chat ID hợp lệ (VD: 123456789 hoặc -100...)."
+                    "Please enter a valid Telegram Chat ID (e.g. 123456789 or -100...)."
                         .to_string(),
                 ));
                 return;
@@ -310,7 +310,7 @@ pub fn SettingsHudView() -> Element {
             clear_dom_input("telegram-add-chat-input", true);
             whitelist_rev.with_mut(|v| *v = v.wrapping_add(1));
             save_banner.set(Some(format!(
-                "Đã thêm {count} Telegram Chat ID vào danh sách cho phép."
+                "Added {count} Telegram Chat ID(s) to whitelist."
             )));
         }
     };
@@ -325,7 +325,7 @@ pub fn SettingsHudView() -> Element {
                 match trimmed.parse::<u64>() {
                     Ok(id) if id > 0 => Some(id),
                     _ => {
-                        save_banner.set(Some("Discord Guild ID không hợp lệ.".to_string()));
+                        save_banner.set(Some("Invalid Discord Guild ID.".to_string()));
                         return;
                     }
                 }
@@ -333,15 +333,15 @@ pub fn SettingsHudView() -> Element {
             if let Ok(mut cfg) = core.config.write() {
                 cfg.channels.discord_guild_id = parsed;
                 match cfg.save() {
-                    Ok(()) => save_banner.set(Some("Đã lưu Discord Guild ID.".to_string())),
-                    Err(e) => save_banner.set(Some(format!("Lỗi lưu config: {e}"))),
+                    Ok(()) => save_banner.set(Some("Saved Discord Guild ID.".to_string())),
+                    Err(e) => save_banner.set(Some(format!("Config save error: {e}"))),
                 }
             }
         }
     };
 
     rsx! {
-        div { class: "col-gap scroll-y", style: "flex: 1; padding-right: 4px;",
+        div { class: "tab-scroll-page",
             if let Some(msg) = save_banner.read().as_ref() {
                 div { class: "toast-strip", style: "border-radius: 8px;",
                     span { "{msg}" }
@@ -756,7 +756,7 @@ pub fn SettingsHudView() -> Element {
                             span { class: "panel-title", "Audio Devices & Local STT" }
                             button {
                                 class: "icon-btn",
-                                "data-tooltip": "Làm mới thiết bị âm thanh",
+                                "data-tooltip": "Refresh Audio Devices",
                                 "data-tooltip-pos": "bottom-right",
                                 onclick: move |_| {
                                     let ins = VoicePipeline::list_input_devices().unwrap_or_default();
@@ -911,7 +911,7 @@ pub fn SettingsHudView() -> Element {
                             {svg_key()}
                             span {
                                 class: if has_secret(keys::DISCORD_BOT_TOKEN) { "vault-status-pill saved" } else { "vault-status-pill missing" },
-                                if has_secret(keys::DISCORD_BOT_TOKEN) { "● Đã lưu" } else { "○ Chưa có" }
+                                if has_secret(keys::DISCORD_BOT_TOKEN) { "● Saved" } else { "○ Missing" }
                             }
                             input {
                                 id: "vault-discord-token",
@@ -919,7 +919,7 @@ pub fn SettingsHudView() -> Element {
                                 style: "flex: 1; min-width: 0;",
                                 spellcheck: "false",
                                 r#type: if *show_discord_token.read() { "text" } else { "password" },
-                                placeholder: "Dán Discord Bot Token...",
+                                placeholder: "Paste Discord Bot Token...",
                                 oninput: move |evt| discord_token.set(evt.value()),
                                 onkeydown: {
                                     let mut act = trigger_discord_save_connect.clone();
@@ -932,7 +932,7 @@ pub fn SettingsHudView() -> Element {
                             }
                             button {
                                 class: "icon-btn",
-                                "data-tooltip": if *show_discord_token.read() { "Ẩn token" } else { "Hiện token" },
+                                "data-tooltip": if *show_discord_token.read() { "Hide Token" } else { "Reveal Token" },
                                 onclick: move |_| {
                                     let next = !*show_discord_token.read();
                                     show_discord_token.set(next);
@@ -946,11 +946,11 @@ pub fn SettingsHudView() -> Element {
                                     move |_| act()
                                 },
                                 {svg_link()}
-                                "Lưu & Kết nối"
+                                "Save & Connect"
                             }
                             button {
                                 class: "icon-btn danger",
-                                "data-tooltip": "Xóa Discord Token",
+                                "data-tooltip": "Delete Discord Token",
                                 onclick: {
                                     let mut del = delete_secret_key.clone();
                                     let core = ctx.core.clone();
@@ -972,14 +972,14 @@ pub fn SettingsHudView() -> Element {
                         label { class: "muted", "Allowed User IDs (Whitelist)" }
                         div { class: "id-chip-list",
                             if allowed_discord_users.is_empty() {
-                                span { class: "muted", "Chưa có User ID nào — thêm ID hoặc nhắn bot để hiện nút ghép nối." }
+                                span { class: "muted", "No User IDs added yet — add an ID below or message the bot to pair." }
                             } else {
                                 for uid in allowed_discord_users {
                                     div { class: "id-chip", key: "dc-uid-{uid}",
                                         span { "{uid}" }
                                         button {
                                             class: "id-chip-remove",
-                                            "data-tooltip": "Xóa User ID",
+                                            "data-tooltip": "Remove User ID",
                                             onclick: {
                                                 let mut c = ctx.clone();
                                                 move |_| {
@@ -1017,14 +1017,14 @@ pub fn SettingsHudView() -> Element {
                                                             match add_allowed_discord_user(&mut c, uid) {
                                                                 Ok(()) => {
                                                                     whitelist_rev.with_mut(|v| *v = v.wrapping_add(1));
-                                                                    save_banner.set(Some(format!("Đã cho phép Discord User {uid}")));
+                                                                    save_banner.set(Some(format!("Allowed Discord User {uid}")));
                                                                 }
                                                                 Err(err) => save_banner.set(Some(err)),
                                                             }
                                                         }
                                                     }
                                                 },
-                                                "+ Cho phép {sid} ({dname})"
+                                                "+ Allow {sid} ({dname})"
                                             }
                                         }
                                     }
@@ -1038,7 +1038,7 @@ pub fn SettingsHudView() -> Element {
                                 class: "hud-input",
                                 style: "flex: 1;",
                                 spellcheck: "false",
-                                placeholder: "Thêm User ID (VD: 362150827776933888 hoặc @mention)...",
+                                placeholder: "Add User ID (e.g. 362150827776933888 or @mention)...",
                                 oninput: move |evt| discord_add_input.set(evt.value()),
                                 onkeydown: {
                                     let mut add_fn = add_discord_users_from_input.clone();
@@ -1062,12 +1062,12 @@ pub fn SettingsHudView() -> Element {
 
                     // Optional Default Server (Guild ID)
                     div { class: "col-gap",
-                        label { class: "muted", "Default Server (Guild ID - tùy chọn)" }
+                        label { class: "muted", "Default Server (Guild ID - optional)" }
                         input {
                             id: "settings-discord-guild-input",
                             class: "hud-input",
                             spellcheck: "false",
-                            placeholder: "Tự động dò mọi server (nhập Guild ID nếu muốn cố định)",
+                            placeholder: "Auto-detect any server (enter Guild ID to pin)",
                             initial_value: "{init_discord_guild}",
                             oninput: move |evt| discord_guild.set(evt.value()),
                             onkeydown: {
@@ -1105,7 +1105,7 @@ pub fn SettingsHudView() -> Element {
                                         core.channels.telegram().enable_pairing_window(Duration::from_secs(60));
                                         pairing_tick.with_mut(|v| *v = v.wrapping_add(1));
                                         save_banner.set(Some(
-                                            "Đã bật chế độ ghép đôi /start trong 60 giây — hãy nhắn /start cho bot trên Telegram."
+                                            "Enabled /start pairing for 60s — send /start to your Telegram bot now."
                                                 .to_string(),
                                         ));
                                         let core_async = core.clone();
@@ -1127,14 +1127,14 @@ pub fn SettingsHudView() -> Element {
                                     }
                                 },
                                 if let Some(rem) = tg_pairing_rem {
-                                    "Đang chờ /start ({rem}s)"
+                                    "Waiting for /start ({rem}s)"
                                 } else {
-                                    "Ghép đôi /start (60s)"
+                                    "Pair /start (60s)"
                                 }
                             }
                             button {
                                 class: "icon-btn",
-                                "data-tooltip": "Gửi tin nhắn thử",
+                                "data-tooltip": "Send Test Ping",
                                 onclick: {
                                     let core = ctx.core.clone();
                                     let mut ui_sig = ctx.ui_state;
@@ -1143,12 +1143,12 @@ pub fn SettingsHudView() -> Element {
                                         spawn(async move {
                                             match core.channels.telegram().send_test_ping().await {
                                                 Ok(cnt) => {
-                                                    let msg = format!("Đã gửi tin nhắn thử tới {cnt} Telegram chat.");
+                                                    let msg = format!("Sent test ping to {cnt} Telegram chat(s).");
                                                     save_banner.set(Some(msg.clone()));
                                                     ui_sig.write().toast_banner = Some(msg);
                                                 }
                                                 Err(err) => {
-                                                    let msg = format!("Test Ping thất bại: {err}");
+                                                    let msg = format!("Test Ping failed: {err}");
                                                     save_banner.set(Some(msg.clone()));
                                                     ui_sig.write().toast_banner = Some(msg);
                                                 }
@@ -1206,7 +1206,7 @@ pub fn SettingsHudView() -> Element {
                             {svg_key()}
                             span {
                                 class: if has_secret(keys::TELEGRAM_BOT_TOKEN) { "vault-status-pill saved" } else { "vault-status-pill missing" },
-                                if has_secret(keys::TELEGRAM_BOT_TOKEN) { "● Đã lưu" } else { "○ Chưa có" }
+                                if has_secret(keys::TELEGRAM_BOT_TOKEN) { "● Saved" } else { "○ Missing" }
                             }
                             input {
                                 id: "vault-telegram-token",
@@ -1214,7 +1214,7 @@ pub fn SettingsHudView() -> Element {
                                 style: "flex: 1; min-width: 0;",
                                 spellcheck: "false",
                                 r#type: if *show_telegram_token.read() { "text" } else { "password" },
-                                placeholder: "Dán Telegram Bot Token...",
+                                placeholder: "Paste Telegram Bot Token...",
                                 oninput: move |evt| telegram_token.set(evt.value()),
                                 onkeydown: {
                                     let mut act = trigger_telegram_save_connect.clone();
@@ -1227,7 +1227,7 @@ pub fn SettingsHudView() -> Element {
                             }
                             button {
                                 class: "icon-btn",
-                                "data-tooltip": if *show_telegram_token.read() { "Ẩn token" } else { "Hiện token" },
+                                "data-tooltip": if *show_telegram_token.read() { "Hide Token" } else { "Reveal Token" },
                                 onclick: move |_| {
                                     let next = !*show_telegram_token.read();
                                     show_telegram_token.set(next);
@@ -1241,11 +1241,11 @@ pub fn SettingsHudView() -> Element {
                                     move |_| act()
                                 },
                                 {svg_link()}
-                                "Lưu & Kết nối"
+                                "Save & Connect"
                             }
                             button {
                                 class: "icon-btn danger",
-                                "data-tooltip": "Xóa Telegram Token",
+                                "data-tooltip": "Delete Telegram Token",
                                 onclick: {
                                     let mut del = delete_secret_key.clone();
                                     let core = ctx.core.clone();
@@ -1267,14 +1267,14 @@ pub fn SettingsHudView() -> Element {
                         label { class: "muted", "Allowed Chat IDs (Whitelist)" }
                         div { class: "id-chip-list",
                             if allowed_telegram_chats.is_empty() {
-                                span { class: "muted", "Chưa có Chat ID — bấm 'Ghép đôi /start' rồi nhắn /start vào bot Telegram của bạn" }
+                                span { class: "muted", "No Chat IDs added yet — click 'Pair /start (60s)' and send /start to your Telegram bot." }
                             } else {
                                 for cid in allowed_telegram_chats {
                                     div { class: "id-chip", key: "tg-cid-{cid}",
                                         span { "{cid}" }
                                         button {
                                             class: "id-chip-remove",
-                                            "data-tooltip": "Xóa Chat ID",
+                                            "data-tooltip": "Remove Chat ID",
                                             onclick: {
                                                 let mut c = ctx.clone();
                                                 move |_| {
@@ -1312,14 +1312,14 @@ pub fn SettingsHudView() -> Element {
                                                             match add_allowed_telegram_chat(&mut c, cid) {
                                                                 Ok(()) => {
                                                                     whitelist_rev.with_mut(|v| *v = v.wrapping_add(1));
-                                                                    save_banner.set(Some(format!("Đã cho phép Telegram Chat {cid}")));
+                                                                    save_banner.set(Some(format!("Allowed Telegram Chat {cid}")));
                                                                 }
                                                                 Err(err) => save_banner.set(Some(err)),
                                                             }
                                                         }
                                                     }
                                                 },
-                                                "+ Cho phép {sid} ({dname})"
+                                                "+ Allow {sid} ({dname})"
                                             }
                                         }
                                     }
@@ -1333,7 +1333,7 @@ pub fn SettingsHudView() -> Element {
                                 class: "hud-input",
                                 style: "flex: 1;",
                                 spellcheck: "false",
-                                placeholder: "Thêm Chat ID (VD: 123456789 hoặc -100...)...",
+                                placeholder: "Add Chat ID (e.g. 123456789 or -100...)...",
                                 oninput: move |evt| telegram_add_input.set(evt.value()),
                                 onkeydown: {
                                     let mut add_fn = add_telegram_chats_from_input.clone();

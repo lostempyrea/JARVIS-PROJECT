@@ -78,7 +78,7 @@ pub fn CommsMatrixView() -> Element {
     };
 
     rsx! {
-        div { class: "col-gap", style: "flex: 1; min-height: 0;",
+        div { class: "tab-scroll-page",
             // Top 3-Channel Status Matrix
             div { class: "grid-3",
                 for ch in statuses {
@@ -108,7 +108,7 @@ pub fn CommsMatrixView() -> Element {
                                         button {
                                             class: "icon-btn",
                                             style: "width: 26px; height: 26px;",
-                                            "data-tooltip": "Cài đặt Token & ID",
+                                            "data-tooltip": "Configure Token & IDs",
                                             "data-tooltip-pos": "bottom-right",
                                             onclick: move |_| ctx.active_tab.set(DashboardTab::Settings),
                                             {svg_settings()}
@@ -152,7 +152,7 @@ pub fn CommsMatrixView() -> Element {
                                                                         if let Err(err) = add_allowed_discord_user(&mut c, uid) {
                                                                             c.ui_state.write().toast_banner = Some(err);
                                                                         } else {
-                                                                            c.ui_state.write().toast_banner = Some(format!("Đã cho phép Discord User {uid}"));
+                                                                            c.ui_state.write().toast_banner = Some(format!("Allowed Discord User {uid}"));
                                                                         }
                                                                     }
                                                                 } else if ch_click == "telegram" {
@@ -160,13 +160,13 @@ pub fn CommsMatrixView() -> Element {
                                                                         if let Err(err) = add_allowed_telegram_chat(&mut c, cid) {
                                                                             c.ui_state.write().toast_banner = Some(err);
                                                                         } else {
-                                                                            c.ui_state.write().toast_banner = Some(format!("Đã cho phép Telegram Chat {cid}"));
+                                                                            c.ui_state.write().toast_banner = Some(format!("Allowed Telegram Chat {cid}"));
                                                                         }
                                                                     }
                                                                 }
                                                             }
                                                         },
-                                                        "+ Cho phép {sid} ({dname})"
+                                                        "+ Allow {sid} ({dname})"
                                                     }
                                                 }
                                             }
@@ -221,7 +221,7 @@ pub fn CommsMatrixView() -> Element {
                                                         core.channels.telegram().enable_pairing_window(Duration::from_secs(60));
                                                         pairing_tick.with_mut(|v| *v = v.wrapping_add(1));
                                                         ui_sig.write().toast_banner = Some(
-                                                            "Đã bật ghép đôi /start (60s) — nhắn /start cho bot trên Telegram."
+                                                            "Enabled /start pairing (60s) — send /start to your Telegram bot."
                                                                 .to_string(),
                                                         );
                                                         let core_async = core.clone();
@@ -243,9 +243,9 @@ pub fn CommsMatrixView() -> Element {
                                                     }
                                                 },
                                                 if let Some(rem) = tg_pairing_rem {
-                                                    "Đang chờ /start ({rem}s)"
+                                                    "Waiting for /start ({rem}s)"
                                                 } else {
-                                                    "Ghép đôi /start"
+                                                    "Pair /start"
                                                 }
                                             }
                                         }

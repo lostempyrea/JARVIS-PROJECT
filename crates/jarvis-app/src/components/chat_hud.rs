@@ -1,6 +1,6 @@
 use crate::components::{
-    clear_dom_input, render_chat_item, svg_check, svg_close, svg_headset, svg_pause, svg_play,
-    svg_plus, svg_send, svg_skip, svg_speaker, svg_stop, svg_voice, JarvisUiContext,
+    clear_dom_input, render_chat_item, svg_check, svg_clear, svg_close, svg_edit, svg_headset, svg_mute_speaker, svg_pause, svg_play,
+    svg_plus, svg_send, svg_skip, svg_speaker, svg_stop, svg_trash, svg_voice, JarvisUiContext,
     MicPickerButton,
 };
 use dioxus::events::Key;
@@ -11,8 +11,9 @@ use jarvis_core::{ApprovalDecision, MusicTarget, PlaybackState, UiCommand};
 pub fn ChatHudView() -> Element {
     let ctx = use_context::<JarvisUiContext>();
     let mut prompt_text = use_signal(String::new);
+    let mut editing_session = use_signal(|| false);
+    let mut edit_title_buf = use_signal(String::new);
 
-    let active_session = ctx.active_session_id.read().clone();
     let cfg_info = ctx
         .core
         .config
@@ -34,6 +35,13 @@ pub fn ChatHudView() -> Element {
     };
     drop(ui);
 
+    let active_session = ctx.active_session_id.read().clone();
+    let active_channel = sessions
+        .iter()
+        .find(|s| s.id == active_session)
+        .map(|s| s.channel.as_str());
+    let is_protected = jarvis_core::is_protected_session_id(&active_session, active_channel);
+
     let play_tip = if music_snap.state == PlaybackState::Playing {
         "Pause"
     } else {
@@ -49,41 +57,131 @@ pub fn ChatHudView() -> Element {
         div { class: "col-gap", style: "flex: 1; min-height: 0;",
             // Session Switcher & Mini Music Bar
             div { class: "panel-card", style: "padding: 8px 12px; position: relative; z-index: 40; overflow: visible;",
-                div { class: "row-between",
-                    div { class: "row-gap",
-                        select {
-                            class: "hud-select",
-                            value: "{active_session}",
-                            onchange: {
-                                let mut c = ctx.clone();
-                                move |evt: FormEvent| c.switch_session(evt.value())
-                            },
-                            if !sessions.iter().any(|s| s.id == active_session) {
-                                option { value: "{active_session}", "{active_session}" }
-                            }
-                            for sess in sessions {
-                                option {
-                                    key: "{sess.id}",
-                                    value: "{sess.id}",
-                                    "{sess.title} ({sess.channel})"
+                div { class: "session-bar-row",
+                    div { class: "session-controls-group",
+                        if *editing_session.read() && !is_protected {
+                            div { class: "session-edit-inline",
+                                input {
+                                    id: "session-rename-input",
+                                    class: "hud-input",
+                                    spellcheck: "false",
+                                    value: "{edit_title_buf}",
+                                    oninput: move |evt| edit_title_buf.set(evt.value()),
+                                    onkeydown: {
+                                        let mut c = ctx.clone();
+                                        let active_session = active_session.clone();
+                                        move |evt: KeyboardEvent| {
+                                            if evt.key() == Key::Enter && !evt.data().is_composing() {
+                                                let title = edit_title_buf.read().clone();
+                                                c.rename_session(&active_session, &title);
+                                                editing_session.set(false);
+                                            } else if evt.key() == Key::Escape {
+                                                editing_session.set(false);
+                                            }
+                                        }
+                                    }
+                                }
+                                button {
+                                    class: "icon-btn",
+                                    "data-tooltip": "Save Session Title",
+                                    onclick: {
+                                        let mut c = ctx.clone();
+                                        let active_session = active_session.clone();
+                                        move |_| {
+                                            let title = edit_title_buf.read().clone();
+                                            c.rename_session(&active_session, &title);
+                                            editing_session.set(false);
+                                        }
+                                    },
+                                    {svg_check()}
+                                }
+                                button {
+                                    class: "icon-btn danger",
+                                    "data-tooltip": "Cancel",
+                                    onclick: move |_| editing_session.set(false),
+                                    {svg_close()}
                                 }
                             }
+                        } else {
+                            select {
+                                class: "hud-select",
+                                value: "{active_session}",
+                                onchange: {
+                                    let mut c = ctx.clone();
+                                    move |evt: FormEvent| {
+                                        c.switch_session(evt.value());
+                                        editing_session.set(false);
+                                    }
+                                },
+                                if !sessions.iter().any(|s| s.id == active_session) {
+                                    option { value: "{active_session}", "{active_session}" }
+                                }
+                                for sess in sessions.clone() {
+                                    option {
+                                        key: "{sess.id}",
+                                        value: "{sess.id}",
+                                        "{sess.title} ({sess.channel})"
+                                    }
+                                }
+                            }
+                            button {
+                                class: "icon-btn",
+                                "data-tooltip": "New Session",
+                                "data-tooltip-pos": "bottom-left",
+                                onclick: {
+                                    let mut c = ctx.clone();
+                                    move |_| c.create_new_session()
+                                },
+                                {svg_plus()}
+                            }
+                            button {
+                                class: "icon-btn",
+                                "data-tooltip": "Clear Chat History",
+                                "data-tooltip-pos": "bottom-left",
+                                onclick: {
+                                    let mut c = ctx.clone();
+                                    let active_session = active_session.clone();
+                                    move |_| c.clear_session_history(&active_session)
+                                },
+                                {svg_clear()}
+                            }
+                            if !is_protected {
+                                button {
+                                    class: "icon-btn",
+                                    "data-tooltip": "Rename Session",
+                                    "data-tooltip-pos": "bottom-left",
+                                    onclick: {
+                                        let active_session = active_session.clone();
+                                        let sessions = sessions.clone();
+                                        move |_| {
+                                            let cur_title = sessions.iter().find(|s| s.id == active_session).map(|s| s.title.clone()).unwrap_or_else(|| active_session.clone());
+                                            edit_title_buf.set(cur_title);
+                                            editing_session.set(true);
+                                        }
+                                    },
+                                    {svg_edit()}
+                                }
+                                button {
+                                    class: "icon-btn danger",
+                                    "data-tooltip": "Delete Session",
+                                    "data-tooltip-pos": "bottom-left",
+                                    onclick: {
+                                        let mut c = ctx.clone();
+                                        let active_session = active_session.clone();
+                                        move |_| c.delete_session(&active_session)
+                                    },
+                                    {svg_trash()}
+                                }
+                                span { class: "chip", style: "max-width: 100%; overflow: hidden; text-overflow: ellipsis;", "{cfg_info.0} · {cfg_info.1}" }
+                            } else {
+                                span { class: "chip", "data-tooltip": "Core session — Clear History only", "LOCKED" }
+                                span { class: "chip", style: "max-width: 100%; overflow: hidden; text-overflow: ellipsis;", "{cfg_info.0} · {cfg_info.1}" }
+                            }
                         }
-                        button {
-                            class: "icon-btn",
-                            "data-tooltip": "New Session",
-                            "data-tooltip-pos": "bottom-left",
-                            onclick: {
-                                let mut c = ctx.clone();
-                                move |_| c.create_new_session()
-                            },
-                            {svg_plus()}
-                        }
-                        span { class: "chip", "{cfg_info.0} · {cfg_info.1}" }
                     }
 
                     // Quick Mini Music Strip
-                    div { class: "row-gap",
+                    div { class: "session-music-group",
                         span { class: "muted", style: "max-width: 190px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;",
                             if let Some(track) = &music_snap.current {
                                 "♫ {track.title}"
@@ -147,12 +245,12 @@ pub fn ChatHudView() -> Element {
 
             // Inline Approval Cards
             if !pending.is_empty() {
-                div { class: "col-gap",
+                div { class: "col-gap", style: "max-height: 36%; overflow-y: auto;",
                     for req in pending {
                         div { class: "approval-card", key: "{req.id}",
                             div { class: "approval-head",
                                 span { class: "approval-tool", "⚠ APPROVAL REQUIRED: {req.tool_name}" }
-                                span { class: "muted", {format!("{}", req.created_at.format("%H:%M:%S"))} }
+                                span { class: "muted", {format!("{}", req.created_at.with_timezone(&chrono::Local).format("%H:%M:%S"))} }
                             }
                             div { class: "approval-reason", "{req.reason}" }
                             div { class: "approval-preview", "{req.command_or_args}" }
@@ -220,6 +318,19 @@ pub fn ChatHudView() -> Element {
                     {svg_voice()}
                 }
                 MicPickerButton { tooltip_pos: "top-left" }
+                button {
+                    class: "icon-btn danger",
+                    "data-tooltip": "Mute / Stop Speaking",
+                    "data-tooltip-pos": "top-left",
+                    onclick: {
+                        let mut c = ctx.clone();
+                        move |_| {
+                            c.core.voice.stop_speaking();
+                            c.ui_state.write().toast_banner = Some("🔇 JARVIS muted.".to_string());
+                        }
+                    },
+                    {svg_mute_speaker()}
+                }
                 button {
                     class: if ptt_active { "hud-btn danger active" } else { "hud-btn" },
                     "data-tooltip": "Hold Push-to-Talk",

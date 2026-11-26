@@ -47,18 +47,19 @@ input, textarea, select, pre, code, .selectable {
 
 /* Custom Thin Cyan Scrollbars */
 ::-webkit-scrollbar {
-  width: 5px;
-  height: 5px;
+  width: 7px;
+  height: 7px;
 }
 ::-webkit-scrollbar-track {
-  background: rgba(0, 20, 36, 0.35);
+  background: rgba(4, 12, 24, 0.45);
+  border-radius: 999px;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(0, 240, 255, 0.35);
-  border-radius: 3px;
+  background: rgba(0, 240, 255, 0.34);
+  border-radius: 999px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgba(0, 240, 255, 0.7);
+  background: rgba(0, 240, 255, 0.62);
 }
 
 /* Pure-CSS Micro-Tooltips */
@@ -880,6 +881,68 @@ input, textarea, select, pre, code, .selectable {
   padding: 14px;
   gap: 12px;
   overflow: hidden;
+}
+
+.tab-scroll-page {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+}
+.tab-scroll-page > * {
+  flex-shrink: 0;
+}
+.session-bar-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+.session-controls-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 1 1 320px;
+  min-width: 0;
+  max-width: 100%;
+}
+.session-controls-group .hud-select {
+  flex: 0 1 220px;
+  min-width: 110px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.session-edit-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 220px;
+  min-width: 0;
+  max-width: 100%;
+}
+.session-edit-inline .hud-input {
+  flex: 1 1 140px;
+  min-width: 90px;
+  max-width: 280px;
+  padding: 5px 9px;
+}
+.session-music-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: auto;
 }
 
 /* Panel Cards & Grids */
