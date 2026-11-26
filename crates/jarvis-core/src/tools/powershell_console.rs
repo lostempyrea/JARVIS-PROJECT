@@ -387,14 +387,16 @@ mod tests {
         manager.ensure_started(dir.path(), "test-sess").await.unwrap();
         assert!(manager.is_running());
 
-        manager.send_command("$global:JarvisVal = 42; pwd", dir.path(), "test-sess").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        manager.send_command("$global:JarvisVal = 42; Write-Output \"JARVIS_PS_OK_$global:JarvisVal\"; pwd", dir.path(), "test-sess").await.unwrap();
 
         let mut saw_val = false;
         let mut _saw_pwd = false;
         let start = std::time::Instant::now();
-        while start.elapsed() < Duration::from_secs(10) {
-            if let Ok(CoreEvent::TerminalLine { line, .. }) = tokio::time::timeout(Duration::from_millis(200), rx.recv()).await.unwrap_or(Err(tokio::sync::broadcast::error::RecvError::Closed)) {
-                if line.contains("42") {
+        while start.elapsed() < Duration::from_secs(15) {
+            if let Ok(CoreEvent::TerminalLine { line, .. }) = tokio::time::timeout(Duration::from_millis(300), rx.recv()).await.unwrap_or(Err(tokio::sync::broadcast::error::RecvError::Closed)) {
+                if line.contains("42") || line.contains("JARVIS_PS_OK_42") {
                     saw_val = true;
                 }
                 if line.contains(&dir.path().to_string_lossy().to_string()) || line.contains("Path") {

@@ -137,8 +137,6 @@ impl AppState {
             Arc::clone(&secrets),
         ));
 
-        #[allow(unused_variables)]
-        let ps_console = Arc::new(PowerShellConsoleManager::new(event_bus.clone()));
         let pty = Arc::new(PtyManager::new(event_bus.clone()));
 
         let mut registry = ToolRegistry::with_builtins();
@@ -153,6 +151,7 @@ impl AppState {
             Arc::clone(&config_lock),
             Arc::clone(&pty),
         )));
+        registry.register(Arc::new(tools::pty_tool::PtyTerminalTool::new(Arc::clone(&pty))));
         let tools = Arc::new(registry);
 
         let agent = AgentRuntime::new(

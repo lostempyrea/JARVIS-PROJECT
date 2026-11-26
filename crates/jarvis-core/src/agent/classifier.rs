@@ -57,6 +57,45 @@ impl CommandRiskClassifier {
                     .unwrap_or_default();
                 Self::classify_terminal_command(cmd)
             }
+            "pty_terminal" => {
+                let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("read_screen");
+                match action {
+                    "list_tabs" | "read_screen" => {
+                        ClassificationResult::safe("Read-only pty_terminal action")
+                    }
+                    "open_agy" => {
+                        let prompt = args.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+                        if prompt.trim().is_empty() {
+                            ClassificationResult::safe("Opening interactive AGY without initial prompt is safe read-only")
+                        } else {
+                            ClassificationResult::approval("Opening interactive AGY with initial prompt requires approval")
+                        }
+                    }
+                    "open_powershell" => {
+                        let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
+                        if command.trim().is_empty() {
+                            ClassificationResult::safe("Opening empty PowerShell tab is safe read-only")
+                        } else {
+                            Self::classify_terminal_command(command)
+                        }
+                    }
+                    "send_input" => {
+                        let ctrl_c = args.get("ctrl_c").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let input = args.get("input").and_then(|v| v.as_str()).unwrap_or("");
+                        if ctrl_c && input.trim().is_empty() {
+                            ClassificationResult::safe("Sending Ctrl+C signal is safe read-only")
+                        } else {
+                            Self::classify_terminal_command(input)
+                        }
+                    }
+                    "restart_tab" | "close_tab" => {
+                        ClassificationResult::approval(format!("Mutating pty_terminal action '{action}' requires approval"))
+                    }
+                    _ => {
+                        ClassificationResult::approval(format!("Unknown pty_terminal action '{action}' requires approval"))
+                    }
+                }
+            }
             "fs_read" | "fs_glob" | "fs_grep" => {
                 let path_key = if tool_name == "fs_read" { "path" } else { "root" };
                 if let Some(p) = args.get(path_key).and_then(|v| v.as_str()) {
@@ -834,6 +873,84 @@ mod tests {
             CommandRiskClassifier::classify_tool_call(
                 "gmail_send_confirmed",
                 &serde_json::json!({"to": "a@b.com"}),
+                dir.path()
+            )
+            .tier,
+            RiskTier::RequiresApproval
+        );
+    }
+
+    #[test]
+    fn pty_terminal_classification_gates_mutating_actions() {
+        let dir = TempDir::new().unwrap();
+
+        // list_tabs & read_screen are safe read-only
+        assert_eq!(
+            CommandRiskClassifier::classify_tool_call(
+                "pty_terminal",
+                &serde_json::json!({"action": "list_tabs"}),
+                dir.path()
+            )
+            .tier,
+            RiskTier::SafeReadOnly
+        );
+        assert_eq!(
+            CommandRiskClassifier::classify_tool_call(
+                "pty_terminal",
+                &serde_json::json!({"action": "read_screen"}),
+                dir.path()
+            )
+            .tier,
+            RiskTier::SafeReadOnly
+        );
+
+        // open_agy without prompt is safe read-only
+        assert_eq!(
+            CommandRiskClassifier::classify_tool_call(
+                "pty_terminal",
+                &serde_json::json!({"action": "open_agy"}),
+                dir.path()
+            )
+            .tier,
+            RiskTier::SafeReadOnly
+        );
+        // open_agy with prompt requires approval
+        assert_eq!(
+            CommandRiskClassifier::classify_tool_call(
+                "pty_terminal",
+                &serde_json::json!({"action": "open_agy", "prompt": "fix bug"}),
+                dir.path()
+            )
+            .tier,
+            RiskTier::RequiresApproval
+        );
+
+        // open_powershell with safe command is safe read-only
+        assert_eq!(
+            CommandRiskClassifier::classify_tool_call(
+                "pty_terminal",
+                &serde_json::json!({"action": "open_powershell", "command": "Get-ChildItem"}),
+                dir.path()
+            )
+            .tier,
+            RiskTier::SafeReadOnly
+        );
+        // open_powershell with mutating command requires approval
+        assert_eq!(
+            CommandRiskClassifier::classify_tool_call(
+                "pty_terminal",
+                &serde_json::json!({"action": "open_powershell", "command": "Remove-Item foo"}),
+                dir.path()
+            )
+            .tier,
+            RiskTier::RequiresApproval
+        );
+
+        // close_tab requires approval
+        assert_eq!(
+            CommandRiskClassifier::classify_tool_call(
+                "pty_terminal",
+                &serde_json::json!({"action": "close_tab", "tab_id": "1"}),
                 dir.path()
             )
             .tier,

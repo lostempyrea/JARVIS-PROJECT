@@ -172,6 +172,84 @@ impl PtyManager {
         self.spawn_conpty(&tab_id, &tab_title, "powershell", &["powershell.exe", "-NoProfile", "-NoLogo", "-NoExit"], cwd, cols, rows)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_agy_tab_with_options(
+        &self,
+        initial_prompt: Option<&str>,
+        model: Option<&str>,
+        effort: Option<&str>,
+        full_auto_mode: bool,
+        cwd: Option<&str>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<String, String> {
+        let tab_id = uuid::Uuid::new_v4().to_string();
+        let mut cmd_line = "agy".to_string();
+        if let Some(m) = model {
+            if !m.trim().is_empty() {
+                cmd_line.push_str(&format!(" --model \"{}\"", m.trim()));
+            }
+        }
+        if let Some(e) = effort {
+            if !e.trim().is_empty() {
+                cmd_line.push_str(&format!(" --effort \"{}\"", e.trim()));
+            }
+        }
+        if full_auto_mode {
+            cmd_line.push_str(" --dangerously-skip-permissions");
+        }
+        if let Some(prompt) = initial_prompt {
+            if !prompt.trim().is_empty() {
+                let escaped = prompt.replace('"', "\\\"");
+                cmd_line.push_str(&format!(" --prompt \"{}\"", escaped));
+            }
+        }
+        let wide_cmd: Vec<u16> = format!("powershell.exe -NoLogo -NoExit -Command \"{}\"", cmd_line)
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        
+        let tab_title = "AGY Assistant".to_string();
+        self.spawn_conpty_raw(&tab_id, &tab_title, "agy", wide_cmd, cwd, cols, rows)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_powershell_tab_with_command(
+        &self,
+        title: Option<String>,
+        command: Option<&str>,
+        cwd: Option<&str>,
+        cols: u16,
+        rows: u16,
+    ) -> Result<String, String> {
+        let tab_id = uuid::Uuid::new_v4().to_string();
+        let tab_title = title.unwrap_or_else(|| "PowerShell".to_string());
+        if let Some(cmd) = command {
+            if !cmd.trim().is_empty() {
+                let escaped = cmd.replace('"', "\\\"");
+                let full_cmd = format!("powershell.exe -NoLogo -NoExit -Command \"{}\"", escaped);
+                let wide_cmd: Vec<u16> = full_cmd
+                    .encode_utf16()
+                    .chain(std::iter::once(0))
+                    .collect();
+                return self.spawn_conpty_raw(&tab_id, &tab_title, "powershell", wide_cmd, cwd, cols, rows);
+            }
+        }
+        self.spawn_conpty(&tab_id, &tab_title, "powershell", &["powershell.exe", "-NoProfile", "-NoLogo", "-NoExit"], cwd, cols, rows)
+    }
+
+    pub fn plain_text_snapshot(&self, tab_id: &str, scroll_offset: usize) -> String {
+        if let Some(snap) = self.snapshot_tab(tab_id, scroll_offset) {
+            snap.rows
+                .iter()
+                .map(|row| row.iter().map(|span| span.text.as_str()).collect::<Vec<_>>().join(""))
+                .collect::<Vec<_>>()
+                .join("\n")
+        } else {
+            "(Tab not found or inactive)".to_string()
+        }
+    }
+
     pub fn spawn_agy_tab(
         &self,
         initial_prompt: Option<&str>,
@@ -501,7 +579,7 @@ impl PtyManager {
         Ok(())
     }
 
-    pub fn close_tab(&self, tab_id: &str) -> bool {
+    pub fn close_tab(&self, tab_id: &str) -> Result<(), String> {
         let mut tabs = self.tabs.lock().unwrap();
         if let Some(mut tab) = tabs.remove(tab_id) {
             tab.alive = false;
@@ -510,9 +588,9 @@ impl PtyManager {
                 CloseHandle(tab.h_process);
                 ClosePseudoConsole(tab.hpcon);
             }
-            true
+            Ok(())
         } else {
-            false
+            Err("Tab not found".to_string())
         }
     }
 

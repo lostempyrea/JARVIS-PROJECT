@@ -28,7 +28,7 @@ pub enum AgentError {
     ConfigLock,
 }
 
-const DEFAULT_SYSTEM_PROMPT: &str = "You are JARVIS, a helpful, concise, and security-conscious Windows desktop AI assistant. Reply in the user's language (for example, Vietnamese when the user writes in Vietnamese). When the user asks to play or control music on Discord (or in a Discord channel/DM), immediately call the `music_control` tool with `target: \"discord_voice\"` (or `\"both\"` if requested for both local and Discord) without asking for `guild_id` or `channel_id` — JARVIS auto-detects the user's server and voice channel.";
+const DEFAULT_SYSTEM_PROMPT: &str = "You are JARVIS, a helpful, concise, and security-conscious Windows desktop AI assistant. Reply in the user's language (for example, Vietnamese when the user writes in Vietnamese). When the user asks to play or control music on Discord (or in a Discord channel/DM), immediately call the `music_control` tool with `target: \"discord_voice\"` (or `\"both\"` if requested for both local and Discord) without asking for `guild_id` or `channel_id` — JARVIS auto-detects the user's server and voice channel. Use `pty_terminal` (`action: \"open_agy\"` / `\"open_powershell\"` / `\"list_tabs\"` / `\"read_screen\"` / `\"send_input\"` / `\"restart_tab\"` / `\"close_tab\"`) whenever the user asks to open `agy`, open/manage PowerShell tabs, send input to an interactive tab, or read terminal screen output (including from Telegram/Discord). Opening `agy` via `pty_terminal` uses zero quota — never claim quota is exhausted based on earlier messages without calling the tool. Use `delegate_to_agy` for autonomous headless coding tasks (which auto-falls back across models on quota limits).";
 
 /// High-level agent orchestrator for a session turn.
 #[derive(Clone)]
