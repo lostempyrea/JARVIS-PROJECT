@@ -1,0 +1,100 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build and publish (e.g. v0.2.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Publish Windows Release
+    runs-on: windows-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || '' }}
+
+      - name: Validate release tag and branch ancestry
+        shell: pwsh
+        run: |
+          $tag = $env:RELEASE_TAG
+          if ($tag -notmatch '^v\d+\.\d+\.\d+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$') {
+            throw "Invalid release tag '$tag'. Expected format: vX.Y.Z or vX.Y.Z-prerelease"
+          }
+
+          git fetch origin main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Failed to fetch origin/main"
+          }
+
+          git merge-base --is-ancestor HEAD origin/main
+          if ($LASTEXITCODE -ne 0) {
+            throw "Tagged commit HEAD is not an ancestor of origin/main"
+          }
+
+      - name: Set JARVIS_BUILD_VERSION and update Cargo.toml
+        shell: pwsh
+        run: |
+          $tag = $env:RELEASE_TAG
+          $version = $tag.Substring(1)
+
+          $cargoToml = Get-Content -Raw -Path Cargo.toml
+          $pattern = '(?ms)(^\[workspace\.package\]\r?\n(?:(?!\[).*\r?\n)*?version\s*=\s*")[^"]+(")'
+          if ($cargoToml -notmatch $pattern) {
+            throw "Could not find version field under [workspace.package] in Cargo.toml"
+          }
+
+          $updated = [regex]::Replace($cargoToml, $pattern, "`${1}$version`${2}", 1)
+          Set-Content -Path Cargo.toml -Value $updated -NoNewline -Encoding utf8
+
+          "JARVIS_BUILD_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          Write-Host "Set JARVIS_BUILD_VERSION=$version"
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Workspace Tests
+        run: cargo test --workspace -- --test-threads=1
+
+      - name: Build Release Binary
+        run: cargo build --release -p jarvis-app
+
+      - name: Package dist/JARVIS.exe and SHA-256 checksum
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item -Path target/release/jarvis-app.exe -Destination dist/JARVIS.exe -Force
+
+          $hash = (Get-FileHash -Path dist/JARVIS.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $checksumLine = "$hash  JARVIS.exe"
+          [System.IO.File]::WriteAllText(
+            (Join-Path (Get-Location) 'dist/JARVIS.exe.sha256'),
+            "$checksumLine`n",
+            [System.Text.UTF8Encoding]::new($false)
+          )
+          Write-Host "Generated checksum: $checksumLine"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          generate_release_notes: true
+          files: |
+            dist/JARVIS.exe
+            dist/JARVIS.exe.sha256
