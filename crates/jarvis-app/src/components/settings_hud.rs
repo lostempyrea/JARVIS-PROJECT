@@ -102,9 +102,11 @@ pub fn SettingsHudView() -> Element {
     let mut secret_rev = use_signal(|| 0u64);
     let mut whitelist_rev = use_signal(|| 0u64);
     let mut pairing_tick = use_signal(|| 0u64);
+    let mut updater_rev = use_signal(|| 0u64);
 
     let mut save_banner = use_signal(|| Option::<String>::None);
     let mut testing_agy = use_signal(|| false);
+    let mut checking_updates = use_signal(|| false);
 
     let mut input_devices = use_signal(|| VoicePipeline::list_input_devices().unwrap_or_default());
     let mut output_devices = use_signal(|| VoicePipeline::list_output_devices().unwrap_or_default());
@@ -112,6 +114,7 @@ pub fn SettingsHudView() -> Element {
     let _sec_rev = *secret_rev.read();
     let _wl_rev = *whitelist_rev.read();
     let _pair_tick = *pairing_tick.read();
+    let _upd_rev = *updater_rev.read();
 
     let secrets_check = ctx.core.secrets.clone();
     let has_secret = move |k: &str| secrets_check.has(k).unwrap_or(false);
@@ -181,7 +184,7 @@ pub fn SettingsHudView() -> Element {
         .collect();
     drop(ui_snap);
 
-    let (allowed_discord_users, allowed_telegram_chats) = ctx
+    let (allowed_discord_users, allowed_telegram_chats, auto_check_enabled, update_interval_mins, skipped_version) = ctx
         .core
         .config
         .read()
@@ -189,9 +192,12 @@ pub fn SettingsHudView() -> Element {
             (
                 c.channels.discord_allowed_user_ids.clone(),
                 c.channels.telegram_allowed_chat_ids.clone(),
+                c.updater.auto_check_enabled,
+                c.updater.check_interval_minutes.max(5),
+                c.updater.skipped_version.clone(),
             )
         })
-        .unwrap_or_default();
+        .unwrap_or_else(|_| (Vec::new(), Vec::new(), true, 30, None));
 
     let tg_pairing_rem = ctx.core.channels.telegram().pairing_remaining_secs();
 
@@ -819,6 +825,113 @@ pub fn SettingsHudView() -> Element {
                                     spellcheck: "false",
                                     initial_value: "{init_local_stt_url}",
                                     oninput: move |evt| local_stt_url.set(evt.value()),
+                                }
+                            }
+                        }
+                    }
+
+                    div { class: "panel-card",
+                        div { class: "panel-header",
+                            span { class: "panel-title", "Software Updates" }
+                            span { class: "chip",
+                                "Current Version: v{jarvis_core::updater::current_version()}"
+                            }
+                        }
+                        div { class: "row-gap", style: "flex-wrap: wrap;",
+                            button {
+                                class: if auto_check_enabled { "hud-btn active" } else { "hud-btn" },
+                                onclick: {
+                                    let core = ctx.core.clone();
+                                    move |_| {
+                                        let next = !auto_check_enabled;
+                                        if let Ok(mut cfg) = core.config.write() {
+                                            cfg.updater.auto_check_enabled = next;
+                                            match cfg.save() {
+                                                Ok(()) => {
+                                                    updater_rev.with_mut(|v| *v = v.wrapping_add(1));
+                                                    save_banner.set(Some(format!(
+                                                        "Auto-check for updates: {}",
+                                                        if next { "ON" } else { "OFF" }
+                                                    )));
+                                                }
+                                                Err(err) => {
+                                                    save_banner.set(Some(format!("Save error: {err}")));
+                                                }
+                                            }
+                                        }
+                                    }
+                                },
+                                if auto_check_enabled {
+                                    "Auto-Check ({update_interval_mins}m): ON"
+                                } else {
+                                    "Auto-Check ({update_interval_mins}m): OFF"
+                                }
+                            }
+                            button {
+                                class: "hud-btn primary",
+                                disabled: *checking_updates.read(),
+                                onclick: {
+                                    let core = ctx.core.clone();
+                                    move |_| {
+                                        checking_updates.set(true);
+                                        let core = core.clone();
+                                        spawn(async move {
+                                            match core.updater.check_for_update(true).await {
+                                                Ok(Some(rel)) => {
+                                                    save_banner.set(Some(format!(
+                                                        "Update v{} is available!",
+                                                        rel.version
+                                                    )));
+                                                }
+                                                Ok(None) => {
+                                                    save_banner.set(Some(format!(
+                                                        "You are running the latest version (v{}).",
+                                                        jarvis_core::updater::current_version()
+                                                    )));
+                                                }
+                                                Err(err) => {
+                                                    save_banner.set(Some(format!(
+                                                        "Update check failed: {err}"
+                                                    )));
+                                                }
+                                            }
+                                            checking_updates.set(false);
+                                        });
+                                    }
+                                },
+                                {svg_refresh()}
+                                if *checking_updates.read() {
+                                    "Checking..."
+                                } else {
+                                    "Check for Updates"
+                                }
+                            }
+                        }
+                        if let Some(ver) = skipped_version {
+                            div { class: "row-gap", style: "flex-wrap: wrap;",
+                                span { class: "chip", "Skipped: v{ver}" }
+                                button {
+                                    class: "hud-btn",
+                                    onclick: {
+                                        let core = ctx.core.clone();
+                                        move |_| {
+                                            if let Ok(mut cfg) = core.config.write() {
+                                                cfg.updater.skipped_version = None;
+                                                match cfg.save() {
+                                                    Ok(()) => {
+                                                        updater_rev.with_mut(|v| *v = v.wrapping_add(1));
+                                                        save_banner.set(Some(
+                                                            "Cleared skipped update version.".to_string(),
+                                                        ));
+                                                    }
+                                                    Err(err) => {
+                                                        save_banner.set(Some(format!("Save error: {err}")));
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    },
+                                    "Clear Skip"
                                 }
                             }
                         }

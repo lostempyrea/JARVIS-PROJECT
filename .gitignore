@@ -1,5 +1,7 @@
 # Rust build artifacts
 /target/
+/dist/
+*.exe.old
 **/*.rs.bk
 
 # Local databases & logs

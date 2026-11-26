@@ -144,6 +144,27 @@ pub struct UiConfig {
     pub orb_y: Option<f64>,
 }
 
+/// Auto-updater configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdaterConfig {
+    pub auto_check_enabled: bool,
+    pub check_interval_minutes: u64,
+    pub github_repo: String,
+    pub skipped_version: Option<String>,
+}
+
+impl Default for UpdaterConfig {
+    fn default() -> Self {
+        Self {
+            auto_check_enabled: true,
+            check_interval_minutes: 30,
+            github_repo: "lostempyrea/JARVIS-PROJECT".to_string(),
+            skipped_version: None,
+        }
+    }
+}
+
 /// Root JARVIS-RS configuration.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -161,6 +182,8 @@ pub struct AppConfig {
     pub voice: VoiceConfig,
     pub channels: ChannelsConfig,
     pub ui: UiConfig,
+    #[serde(default)]
+    pub updater: UpdaterConfig,
 }
 
 impl Default for AppConfig {
@@ -179,6 +202,7 @@ impl Default for AppConfig {
             voice: VoiceConfig::default(),
             channels: ChannelsConfig::default(),
             ui: UiConfig::default(),
+            updater: UpdaterConfig::default(),
         }
     }
 }
@@ -266,6 +290,10 @@ mod tests {
         assert_eq!(cfg.voice.tts_voice, "vi-VN-HoaiMyNeural");
         assert!(cfg.voice.wake_word_enabled);
         assert_eq!(cfg.channels.gmail_auth_mode, "app_password");
+        assert!(cfg.updater.auto_check_enabled);
+        assert_eq!(cfg.updater.check_interval_minutes, 30);
+        assert_eq!(cfg.updater.github_repo, "lostempyrea/JARVIS-PROJECT");
+        assert_eq!(cfg.updater.skipped_version, None);
     }
 
     #[test]

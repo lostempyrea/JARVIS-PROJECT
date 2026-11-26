@@ -3,7 +3,7 @@ use crate::components::{
     clear_dom_input, render_chat_item, svg_check, svg_clear, svg_close, svg_edit, svg_expand,
     svg_headset, svg_minimize, svg_mute_speaker, svg_orb, svg_pause, svg_play, svg_plus, svg_send,
     svg_skip, svg_speaker, svg_stop, svg_trash, svg_voice, ChatTimelineItem, JarvisUiContext,
-    MicPickerButton,
+    MicPickerButton, UpdatePromptCard,
 };
 use crate::window_manager::{PointerDragTracker, WindowMode};
 use dioxus::desktop::use_window;
@@ -159,6 +159,8 @@ pub fn StandbyPopupView() -> Element {
                     }
                 }
             }
+
+            UpdatePromptCard {}
 
             // Mini Music Pill
             div { class: "mini-music-pill",
