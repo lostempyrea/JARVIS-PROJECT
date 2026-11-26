@@ -662,7 +662,7 @@ mod tests {
         }
 
         assert!(found, "ConPTY output should contain CONPTY_OK_123. tabs={:?}\nlast_screen:\n{}", manager.list_tabs(), last_full_text);
-        manager.close_tab(&tab_id);
+        let _ = manager.close_tab(&tab_id);
     }
 
     #[tokio::test]
@@ -695,6 +695,6 @@ mod tests {
         }
 
         assert!(found, "ConPTY output should contain CONPTY_CMD_OK. tabs={:?}\nlast_screen:\n{}", manager.list_tabs(), last_full_text);
-        manager.close_tab(&tab_id);
+        let _ = manager.close_tab(&tab_id);
     }
 }

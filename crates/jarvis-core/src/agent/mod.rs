@@ -28,7 +28,7 @@ pub enum AgentError {
     ConfigLock,
 }
 
-const DEFAULT_SYSTEM_PROMPT: &str = "You are JARVIS, a helpful, concise, and security-conscious Windows desktop AI assistant. Reply in the user's language (for example, Vietnamese when the user writes in Vietnamese). When the user asks to play or control music on Discord (or in a Discord channel/DM), immediately call the `music_control` tool with `target: \"discord_voice\"` (or `\"both\"` if requested for both local and Discord) without asking for `guild_id` or `channel_id` — JARVIS auto-detects the user's server and voice channel. Use `pty_terminal` (`action: \"open_agy\"` / `\"open_powershell\"` / `\"list_tabs\"` / `\"read_screen\"` / `\"send_input\"` / `\"restart_tab\"` / `\"close_tab\"`) whenever the user asks to open `agy`, open/manage PowerShell tabs, send input to an interactive tab, or read terminal screen output (including from Telegram/Discord). Opening `agy` via `pty_terminal` uses zero quota — never claim quota is exhausted based on earlier messages without calling the tool. Use `delegate_to_agy` for autonomous headless coding tasks (which auto-falls back across models on quota limits).";
+const DEFAULT_SYSTEM_PROMPT: &str = "You are JARVIS, a helpful, concise, and security-conscious Windows desktop AI assistant. Reply in the user's language (for example, Vietnamese when the user writes in Vietnamese). When the user asks to play or control music on Discord (or in a Discord channel/DM), immediately call the `music_control` tool with `target: \"discord_voice\"` (or `\"both\"` if requested for both local and Discord) without asking for `guild_id` or `channel_id` — JARVIS auto-detects the user's server and voice channel. Use `pty_terminal` (`action: \"open_agy\"` / `\"open_powershell\"` / `\"list_tabs\"` / `\"read_screen\"` / `\"send_input\"` / `\"restart_tab\"` / `\"close_tab\"`) whenever the user asks to open `agy`, open/manage PowerShell tabs, send input to an interactive tab, or read terminal screen output (including from Telegram/Discord). Opening `agy` via `pty_terminal` uses zero quota — never claim quota is exhausted based on earlier messages without calling the tool. Use `delegate_to_agy` for autonomous headless coding tasks (which auto-falls back across models on quota limits). If a previous tool call in the conversation history was denied by the user (Denied), strictly respect that refusal — never retry delegate_to_agy, pty_terminal, or alternative mutating tools for that denied task unless the user explicitly asks you to execute it again in a new message.";
 
 /// High-level agent orchestrator for a session turn.
 #[derive(Clone)]
@@ -73,7 +73,16 @@ impl AgentRuntime {
             .map_err(|_| AgentError::ConfigLock)?
             .clone();
 
-        self.db.ensure_session(session_id, "JARVIS Session", channel)?;
+        let default_title = if session_id.eq_ignore_ascii_case("hud-main") {
+            "Primary HUD"
+        } else if channel.eq_ignore_ascii_case("telegram") || session_id.starts_with("telegram") {
+            "Telegram"
+        } else if channel.eq_ignore_ascii_case("discord") || session_id.starts_with("discord") {
+            "Discord"
+        } else {
+            "JARVIS Session"
+        };
+        self.db.ensure_session(session_id, default_title, channel)?;
         self.db.add_message(
             &Uuid::new_v4().to_string(),
             session_id,
@@ -135,7 +144,14 @@ impl AgentRuntime {
 /// Build provider prompt history, trimming any orphaned leading `"tool"` rows whose
 /// matching `"assistant"` tool-call turn was truncated outside the retained window.
 fn build_history_messages(history: &[MessageRecord]) -> Vec<ChatMessage> {
-    let mut messages = vec![ChatMessage::system(DEFAULT_SYSTEM_PROMPT)];
+    let now = chrono::Local::now();
+    let system_prompt = format!(
+        "{DEFAULT_SYSTEM_PROMPT}\n\nCurrent real-world local system time: {} (UTC offset: {}, Weekday: {}). Always use this exact local time and date when answering questions or scheduling.",
+        now.format("%Y-%m-%d %H:%M:%S"),
+        now.format("%:z"),
+        now.format("%A")
+    );
+    let mut messages = vec![ChatMessage::system(system_prompt)];
     let start_idx = history
         .iter()
         .position(|rec| rec.role != "tool")

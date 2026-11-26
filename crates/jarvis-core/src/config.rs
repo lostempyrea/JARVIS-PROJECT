@@ -72,6 +72,12 @@ pub struct VoiceConfig {
     pub output_device: Option<String>,
     pub tts_rate: f32,
     pub tts_pitch: f32,
+    #[serde(default = "default_auto_speak_replies")]
+    pub auto_speak_replies: bool,
+}
+
+fn default_auto_speak_replies() -> bool {
+    true
 }
 
 impl Default for VoiceConfig {
@@ -96,6 +102,7 @@ impl Default for VoiceConfig {
             output_device: None,
             tts_rate: 1.0,
             tts_pitch: 0.0,
+            auto_speak_replies: true,
         }
     }
 }

@@ -87,7 +87,7 @@ pub fn MusicDeckView() -> Element {
     };
 
     rsx! {
-        div { class: "col-gap", style: "flex: 1; min-height: 0;",
+        div { class: "tab-scroll-page",
             // Top Controls: Search + Target Output Selector
             div { class: "panel-card",
                 div { class: "panel-header",

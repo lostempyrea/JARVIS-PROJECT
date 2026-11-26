@@ -25,6 +25,10 @@ pub const DEFAULT_YT_DLP_URL: &str =
     "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
 pub const DEFAULT_FFMPEG_URL: &str =
     "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip";
+pub const DEFAULT_WHISPER_CLI_URL: &str =
+    "https://github.com/ggml-org/whisper.cpp/releases/latest/download/whisper-bin-x64.zip";
+pub const DEFAULT_WHISPER_MODEL_URL: &str =
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin";
 
 /// Errors returned by [`BinaryManager`] operations.
 #[derive(Debug, Error)]
@@ -47,11 +51,50 @@ pub struct BinaryStatus {
     pub ffmpeg_path: Option<PathBuf>,
     pub agy_installed: bool,
     pub agy_path: Option<PathBuf>,
+    #[serde(default)]
+    pub whisper_cli_installed: bool,
+    #[serde(default)]
+    pub whisper_cli_path: Option<PathBuf>,
+    #[serde(default)]
+    pub whisper_model_installed: bool,
+    #[serde(default)]
+    pub whisper_model_path: Option<PathBuf>,
 }
 
 /// Return `%APPDATA%\Jarvis\bin` on Windows (or platform config dir fallback).
 pub fn default_bin_dir() -> PathBuf {
     AppConfig::default_dir().join("bin")
+}
+
+/// Return `%APPDATA%\Jarvis\models` (or platform config dir fallback).
+pub fn default_models_dir() -> PathBuf {
+    AppConfig::default_dir().join("models")
+}
+
+pub fn locate_whisper_cli(bin_dir: Option<&Path>) -> Option<PathBuf> {
+    locate_binary("whisper-cli", bin_dir).or_else(|| locate_binary("whisper", bin_dir))
+}
+
+pub fn locate_whisper_model(models_dir: Option<&Path>) -> Option<PathBuf> {
+    let dir = models_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(default_models_dir);
+    let candidates = ["ggml-base.bin", "ggml-small.bin", "ggml-tiny.bin", "ggml-medium.bin"];
+    for name in candidates {
+        let p = dir.join(name);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    // Also check default_bin_dir() if models_dir wasn't explicitly checking there or as fallback
+    let bin_fallback = default_bin_dir();
+    for name in candidates {
+        let p = bin_fallback.join(name);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
 }
 
 /// Normalize executable filename for the host OS (`<stem>.exe` on Windows).
@@ -146,7 +189,7 @@ pub fn locate_binary(stem: &str, bin_dir: Option<&Path>) -> Option<PathBuf> {
     None
 }
 
-/// Check installation status for `yt-dlp`, `ffmpeg`, and `agy`.
+/// Check installation status for `yt-dlp`, `ffmpeg`, `agy`, and whisper cli/model.
 pub fn check_binaries(bin_dir: Option<&Path>) -> BinaryStatus {
     let resolved_dir = bin_dir
         .map(Path::to_path_buf)
@@ -154,6 +197,9 @@ pub fn check_binaries(bin_dir: Option<&Path>) -> BinaryStatus {
     let yt_dlp_path = locate_binary("yt-dlp", Some(&resolved_dir));
     let ffmpeg_path = locate_binary("ffmpeg", Some(&resolved_dir));
     let agy_path = locate_binary("agy", Some(&resolved_dir));
+    let whisper_cli_path = locate_whisper_cli(Some(&resolved_dir));
+    let models_dir = resolved_dir.parent().map(|p| p.join("models")).unwrap_or_else(default_models_dir);
+    let whisper_model_path = locate_whisper_model(Some(&models_dir));
 
     BinaryStatus {
         bin_dir: resolved_dir,
@@ -163,6 +209,10 @@ pub fn check_binaries(bin_dir: Option<&Path>) -> BinaryStatus {
         ffmpeg_path,
         agy_installed: agy_path.is_some(),
         agy_path,
+        whisper_cli_installed: whisper_cli_path.is_some(),
+        whisper_cli_path,
+        whisper_model_installed: whisper_model_path.is_some(),
+        whisper_model_path,
     }
 }
 
@@ -420,6 +470,100 @@ impl BinaryManager {
         self.ensure_ffmpeg().await?;
         Ok(self.check_status())
     }
+
+    /// Add `ensure_whisper_offline` on `BinaryManager`.
+    pub async fn ensure_whisper_offline(&self) -> Result<(PathBuf, PathBuf), BinaryError> {
+        // Step A: Locate or download+extract `whisper-cli`
+        let cli_path = if let Some(existing) = locate_whisper_cli(Some(&self.bin_dir)) {
+            existing
+        } else {
+            let tmp_path = self.download_to_temp_file("whisper-cli", DEFAULT_WHISPER_CLI_URL).await?;
+            self.emit_progress("whisper-cli", "extracting", 0, None);
+
+            let bin_dir_clone = self.bin_dir.clone();
+            let tmp_clone = tmp_path.clone();
+
+            let extract_res = tokio::task::spawn_blocking(move || -> Result<(), BinaryError> {
+                std::fs::create_dir_all(&bin_dir_clone)?;
+                let file = std::fs::File::open(&tmp_clone)?;
+                let mut archive = zip::ZipArchive::new(file)
+                    .map_err(|e| BinaryError::Installer(format!("Invalid whisper-cli zip: {e}")))?;
+
+                let mut main_extracted_path: Option<PathBuf> = None;
+
+                for i in 0..archive.len() {
+                    let mut entry = archive
+                        .by_index(i)
+                        .map_err(|e| BinaryError::Installer(format!("Zip entry error: {e}")))?;
+                    if entry.is_dir() {
+                        continue;
+                    }
+                    let entry_name = entry.name().to_string();
+                    if let Some(filename) = Path::new(&entry_name).file_name() {
+                        let name_str = filename.to_string_lossy().to_ascii_lowercase();
+                        if name_str.ends_with(".exe") || name_str.ends_with(".dll") {
+                            let dest_file = bin_dir_clone.join(filename);
+                            let mut out = std::fs::File::create(&dest_file)?;
+                            std::io::copy(&mut entry, &mut out)?;
+                            if name_str == "main.exe" {
+                                main_extracted_path = Some(dest_file);
+                            }
+                        }
+                    }
+                }
+
+                let target_whisper_cli = bin_dir_clone.join(exe_name("whisper-cli"));
+                if !target_whisper_cli.exists() {
+                    if let Some(main_exe) = main_extracted_path {
+                        if main_exe.is_file() {
+                            std::fs::copy(&main_exe, &target_whisper_cli)?;
+                        }
+                    }
+                }
+
+                Ok(())
+            })
+            .await
+            .map_err(|e| BinaryError::Installer(format!("Zip extraction task failed: {e}")))?;
+
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            if let Err(err) = extract_res {
+                self.emit_progress("whisper-cli", "failed", 0, None);
+                return Err(err);
+            }
+
+            let resolved_cli = locate_whisper_cli(Some(&self.bin_dir)).ok_or_else(|| {
+                BinaryError::Installer("Failed to locate whisper-cli after extraction".to_string())
+            })?;
+
+            let size = std::fs::metadata(&resolved_cli).map(|m| m.len()).unwrap_or(0);
+            self.emit_progress("whisper-cli", "installed", size, Some(size));
+            resolved_cli
+        };
+
+        // Step B: Locate or download `ggml-base.bin` into models_dir
+        let models_dir = self.bin_dir.parent().map(|p| p.join("models")).unwrap_or_else(default_models_dir);
+        std::fs::create_dir_all(&models_dir)?;
+
+        let model_path = if let Some(existing) = locate_whisper_model(Some(&models_dir)) {
+            existing
+        } else {
+            let tmp_path = self.download_to_temp_file("whisper-model", DEFAULT_WHISPER_MODEL_URL).await?;
+            let dest_model = models_dir.join("ggml-base.bin");
+            if dest_model.exists() {
+                let _ = tokio::fs::remove_file(&dest_model).await;
+            }
+            if tokio::fs::rename(&tmp_path, &dest_model).await.is_err() {
+                tokio::fs::copy(&tmp_path, &dest_model).await?;
+                let _ = tokio::fs::remove_file(&tmp_path).await;
+            }
+            let size = std::fs::metadata(&dest_model).map(|m| m.len()).unwrap_or(0);
+            self.emit_progress("whisper-model", "installed", size, Some(size));
+            dest_model
+        };
+
+        Ok((cli_path, model_path))
+    }
 }
 
 #[cfg(test)]
@@ -484,6 +628,10 @@ pub(crate) mod tests {
             ffmpeg_path: None,
             agy_installed: true,
             agy_path: Some(PathBuf::from("C:/Jarvis/bin/agy.exe")),
+            whisper_cli_installed: false,
+            whisper_cli_path: None,
+            whisper_model_installed: true,
+            whisper_model_path: Some(PathBuf::from("C:/Jarvis/models/ggml-base.bin")),
         };
 
         let json = serde_json::to_string(&status).unwrap();

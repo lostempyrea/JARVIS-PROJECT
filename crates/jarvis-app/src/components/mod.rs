@@ -11,7 +11,7 @@ pub mod voice_panel;
 use crate::window_manager::{
     apply_window_mode, persist_orb_position, sync_webview_to_mode, WindowMode,
 };
-use chrono::Utc;
+use chrono::{DateTime, Local};
 use dioxus::desktop::DesktopContext;
 use dioxus::prelude::*;
 use jarvis_core::db::Database;
@@ -210,6 +210,13 @@ impl HudUiState {
         }
     }
 
+    pub fn format_local_hms_from_rfc3339(ts: &str) -> String {
+        if let Ok(dt) = DateTime::parse_from_rfc3339(ts) {
+            return dt.with_timezone(&Local).format("%H:%M:%S").to_string();
+        }
+        ts.get(11..19).unwrap_or(ts).to_string()
+    }
+
     pub fn reload_from_db(&mut self, db: &Database, session_id: &str) {
         if let Ok(sessions) = db.list_sessions(25) {
             self.sessions = sessions;
@@ -221,11 +228,7 @@ impl HudUiState {
                 .position(|rec| rec.role != "tool")
                 .unwrap_or(records.len());
             for rec in records.into_iter().skip(start_idx) {
-                let ts = rec
-                    .created_at
-                    .get(11..19)
-                    .unwrap_or(&rec.created_at)
-                    .to_string();
+                let ts = Self::format_local_hms_from_rfc3339(&rec.created_at);
                 match rec.role.as_str() {
                     "user" => {
                         if !rec.content.trim().is_empty() {
@@ -278,7 +281,7 @@ impl HudUiState {
         self.messages.push(ChatTimelineItem::User {
             id: Uuid::new_v4().to_string(),
             content,
-            timestamp: Utc::now().format("%H:%M:%S").to_string(),
+            timestamp: Local::now().format("%H:%M:%S").to_string(),
         });
         self.streaming_active = true;
     }
@@ -304,6 +307,7 @@ impl HudUiState {
             CoreEvent::PtyUpdated { .. } => {
                 self.pty_rev = self.pty_rev.wrapping_add(1);
             }
+            CoreEvent::TurnComplete { .. } => {}
             CoreEvent::ReactorStateChanged { state } => {
                 self.reactor_state = state;
                 if matches!(state, ReactorState::Idle) {
@@ -321,7 +325,7 @@ impl HudUiState {
                         self.messages.push(ChatTimelineItem::Assistant {
                             id: Uuid::new_v4().to_string(),
                             content: delta,
-                            timestamp: Utc::now().format("%H:%M:%S").to_string(),
+                            timestamp: Local::now().format("%H:%M:%S").to_string(),
                         });
                     }
                 }
@@ -420,7 +424,7 @@ impl HudUiState {
                             tool_name: req.tool_name,
                             command_or_args: req.command_or_args,
                             decision,
-                            timestamp: Utc::now().format("%H:%M:%S").to_string(),
+                            timestamp: Local::now().format("%H:%M:%S").to_string(),
                         },
                     );
                     if self.approval_log.len() > 60 {
@@ -428,9 +432,9 @@ impl HudUiState {
                     }
                 }
                 self.toast_banner = Some(match decision {
-                    ApprovalDecision::Approved => "✓ Đã phê duyệt tác vụ (đồng bộ App ↔ Telegram)".into(),
-                    ApprovalDecision::Denied => "✕ Đã từ chối tác vụ (đồng bộ App ↔ Telegram)".into(),
-                    ApprovalDecision::TimedOut => "⏱ Yêu cầu phê duyệt đã hết hạn".into(),
+                    ApprovalDecision::Approved => "✓ Approved task (synced App ↔ Telegram)".into(),
+                    ApprovalDecision::Denied => "✕ Denied task (synced App ↔ Telegram)".into(),
+                    ApprovalDecision::TimedOut => "⏱ Approval request timed out".into(),
                 });
                 if self.pending_approvals.is_empty()
                     && self.reactor_state == ReactorState::AwaitingApproval
@@ -473,8 +477,15 @@ impl HudUiState {
                 is_command,
             } => {
                 self.last_transcript = Some((text.clone(), is_command));
-                if is_command && session_id == active_session_id {
+                if session_id == active_session_id {
                     self.push_user_message(format!("🎙 {text}"));
+                    if !is_command {
+                        self.messages.push(ChatTimelineItem::Assistant {
+                            id: Uuid::new_v4().to_string(),
+                            content: "Yes, I'm listening! Speak your request.".to_string(),
+                            timestamp: Local::now().format("%H:%M:%S").to_string(),
+                        });
+                    }
                 }
             }
             CoreEvent::MicLevel { db } => {
@@ -551,7 +562,7 @@ impl HudUiState {
                         channel,
                         title,
                         body,
-                        timestamp: Utc::now().format("%H:%M:%S").to_string(),
+                        timestamp: Local::now().format("%H:%M:%S").to_string(),
                     },
                 );
                 if self.channel_notifications.len() > 30 {
@@ -565,7 +576,7 @@ impl HudUiState {
                 preview,
             } => {
                 self.toast_banner = Some(format!(
-                    "[{channel}] Yêu cầu kết nối từ {display_name} (ID: {sender_id})"
+                    "[{channel}] Pairing request from {display_name} (ID: {sender_id})"
                 ));
                 self.pairing_candidates
                     .retain(|c| !(c.channel == channel && c.sender_id == sender_id));
@@ -592,7 +603,7 @@ impl HudUiState {
                     self.messages.push(ChatTimelineItem::Assistant {
                         id: Uuid::new_v4().to_string(),
                         content: format!("⚠ {message}"),
-                        timestamp: Utc::now().format("%H:%M:%S").to_string(),
+                        timestamp: Local::now().format("%H:%M:%S").to_string(),
                     });
                 }
             }
@@ -656,14 +667,16 @@ impl JarvisUiContext {
     }
 
     pub fn resolve_approval(&mut self, id: &str, decision: ApprovalDecision) {
-        self.send_command(UiCommand::ResolveApproval {
-            id: id.to_string(),
-            decision,
-        });
+        if !self.core.approval_broker.resolve(id, decision) {
+            let mut ui = self.ui_state.write();
+            ui.pending_approvals.retain(|p| p.id != id);
+            ui.reconcile_approvals(&self.core);
+        }
     }
 
     pub fn switch_session(&mut self, session_id: String) {
         self.active_session_id.set(session_id.clone());
+        self.core.voice.set_active_session(session_id.clone());
         self.ui_state
             .write()
             .reload_from_db(&self.core.db, &session_id);
@@ -671,11 +684,44 @@ impl JarvisUiContext {
 
     pub fn create_new_session(&mut self) {
         let id = format!("hud-{}", Uuid::new_v4());
-        let title = format!("Session {}", Utc::now().format("%H:%M"));
+        let title = format!("Session {}", Local::now().format("%H:%M"));
         if let Err(err) = self.core.db.ensure_session(&id, &title, "hud") {
             tracing::warn!("Failed to create new session: {err}");
         }
         self.switch_session(id);
+    }
+
+    pub fn rename_session(&mut self, session_id: &str, new_title: &str) {
+        let trimmed = new_title.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let _ = self.core.db.ensure_session(session_id, trimmed, "hud");
+        let _ = self.core.db.update_session_title(session_id, trimmed);
+        let mut ui = self.ui_state.write();
+        ui.reload_from_db(&self.core.db, session_id);
+        ui.toast_banner = Some(format!("Renamed session to '{trimmed}'"));
+    }
+
+    pub fn clear_session_history(&mut self, session_id: &str) {
+        let _ = self.core.db.clear_session_messages(session_id);
+        let mut ui = self.ui_state.write();
+        ui.messages.clear();
+        ui.reload_from_db(&self.core.db, session_id);
+        ui.toast_banner = Some("Cleared session message history.".to_string());
+    }
+
+    pub fn delete_session(&mut self, session_id: &str) {
+        let _ = self.core.db.delete_session(session_id);
+        match self.core.db.list_sessions(25) {
+            Ok(list) if !list.is_empty() => {
+                self.switch_session(list[0].id.clone());
+            }
+            _ => {
+                self.create_new_session();
+            }
+        }
+        self.ui_state.write().toast_banner = Some("Session deleted.".to_string());
     }
 }
 
@@ -745,7 +791,7 @@ pub fn parse_telegram_chat_ids_input(raw: &str) -> Vec<i64> {
 
 pub fn add_allowed_discord_user(ctx: &mut JarvisUiContext, uid: u64) -> Result<(), String> {
     if uid == 0 {
-        return Err("Discord User ID không hợp lệ.".to_string());
+        return Err("Invalid Discord User ID.".to_string());
     }
     if let Ok(mut cfg) = ctx.core.config.write() {
         if !cfg.channels.discord_allowed_user_ids.contains(&uid) {
@@ -782,7 +828,7 @@ pub fn remove_allowed_discord_user(ctx: &mut JarvisUiContext, uid: u64) -> Resul
 
 pub fn add_allowed_telegram_chat(ctx: &mut JarvisUiContext, chat_id: i64) -> Result<(), String> {
     if chat_id == 0 {
-        return Err("Telegram Chat ID không hợp lệ.".to_string());
+        return Err("Invalid Telegram Chat ID.".to_string());
     }
     if let Ok(mut cfg) = ctx.core.config.write() {
         if !cfg.channels.telegram_allowed_chat_ids.contains(&chat_id) {
@@ -1346,6 +1392,34 @@ pub fn svg_copy() -> Element {
         svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
             rect { x: "9", y: "9", width: "13", height: "13", rx: "2", ry: "2" }
             path { d: "M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" }
+        }
+    }
+}
+
+pub fn svg_mute_speaker() -> Element {
+    rsx! {
+        svg { width: "15", height: "15", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            polygon { points: "11 5 6 9 2 9 2 15 6 15 11 19 11 5" }
+            line { x1: "23", y1: "9", x2: "17", y2: "15" }
+            line { x1: "17", y1: "9", x2: "23", y2: "15" }
+        }
+    }
+}
+
+pub fn svg_edit() -> Element {
+    rsx! {
+        svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "M12 20h9" }
+            path { d: "M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" }
+        }
+    }
+}
+
+pub fn svg_clear() -> Element {
+    rsx! {
+        svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+            path { d: "M20 20H7L3 16c-.8-.8-.8-2 0-2.8L13.8 2.4c.8-.8 2-.8 2.8 0L21.6 7.4c.8.8.8 2 0 2.8L12 20" }
+            line { x1: "6.5", y1: "12.5", x2: "14.5", y2: "20" }
         }
     }
 }

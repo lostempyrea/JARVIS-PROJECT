@@ -196,12 +196,12 @@ impl TelegramAdapter {
         let chat_ids = self.channels_cfg().telegram_allowed_chat_ids;
         if chat_ids.is_empty() {
             return Err(ChannelError::Config(
-                "Chưa có Telegram Chat ID nào trong danh sách cho phép.".into(),
+                "No Telegram Chat IDs configured in whitelist.".into(),
             ));
         }
         let token = self.resolve_token()?;
         let bot = Bot::new(token);
-        let msg = "⚡ [JARVIS-RS] Kết nối Telegram hoạt động bình thường!";
+        let msg = "⚡ [JARVIS-RS] Telegram connection is online and healthy!";
         let mut sent = 0usize;
         for chat_id in chat_ids {
             bot.send_message(ChatId(chat_id), msg)
@@ -316,9 +316,9 @@ impl TelegramAdapter {
     /// Return status footer string for resolved approvals.
     pub fn decision_status_footer(decision: ApprovalDecision) -> &'static str {
         match decision {
-            ApprovalDecision::Approved => "✅ ĐÃ CHẤP THUẬN (Approved)",
-            ApprovalDecision::Denied => "❌ ĐÃ TỪ CHỐI (Rejected)",
-            ApprovalDecision::TimedOut => "⏱ ĐÃ HẾT HẠN (Timed Out)",
+            ApprovalDecision::Approved => "✅ APPROVED",
+            ApprovalDecision::Denied => "❌ REJECTED",
+            ApprovalDecision::TimedOut => "⏱ TIMED OUT",
         }
     }
 
@@ -446,18 +446,18 @@ impl TelegramAdapter {
                         }
                         event_bus.publish(CoreEvent::Notification {
                             title: "Telegram Paired".into(),
-                            body: format!("Đã ghép nối Chat ID {chat_id} ({display_name})"),
+                            body: format!("Paired Chat ID {chat_id} ({display_name})"),
                         });
                         event_bus.publish(CoreEvent::ChannelNotification {
                             channel: "telegram".into(),
-                            title: "Đã ghép nối Telegram".into(),
+                            title: "Telegram Paired".into(),
                             body: format!("Chat ID {chat_id} ({display_name})"),
                         });
                         let _ = bot
                             .send_message(
                                 msg.chat.id,
                                 format!(
-                                    "✅ Đã ghép nối thành công với JARVIS-RS!\nChat ID `{chat_id}` đã được lưu vào danh sách cho phép. Bạn có thể gửi lệnh hoặc duyệt tác vụ ngay tại đây."
+                                    "✅ Successfully paired with JARVIS-RS!\nChat ID `{chat_id}` has been added to the whitelist. You can now send commands or approve tasks here."
                                 ),
                             )
                             .await;
@@ -474,7 +474,7 @@ impl TelegramAdapter {
                         .send_message(
                             msg.chat.id,
                             format!(
-                                "Unauthorized. Your Telegram Chat ID is: {chat_id}. Bấm '+ Cho phép' trên JARVIS HUD hoặc dán ID này vào mục Telegram Bot."
+                                "Unauthorized. Your Telegram Chat ID is: {chat_id}. Click '+ Allow' on the JARVIS HUD or add this ID under Settings -> Telegram Bot."
                             ),
                         )
                         .await;

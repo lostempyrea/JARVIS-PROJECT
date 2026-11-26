@@ -368,6 +368,8 @@ pub fn apply_window_mode(
             win.set_decorations(false);
             win.set_resizable(false);
             win.set_always_on_top(true);
+            #[cfg(target_os = "windows")]
+            let _ = win.set_skip_taskbar(true);
             let (ox, oy) = (
                 anchor.0.clamp(
                     bounds.x + SCREEN_MARGIN,
@@ -384,6 +386,8 @@ pub fn apply_window_mode(
             win.set_decorations(false);
             win.set_resizable(false);
             win.set_always_on_top(true);
+            #[cfg(target_os = "windows")]
+            let _ = win.set_skip_taskbar(false);
             let (pw, ph) = effective_popup_size(bounds);
             let (px, py) = compute_popup_position(anchor.0, anchor.1, bounds);
             resize_window_and_webview(desktop, pw, ph, px, py);
@@ -393,6 +397,8 @@ pub fn apply_window_mode(
             win.set_decorations(false);
             win.set_always_on_top(false);
             win.set_resizable(true);
+            #[cfg(target_os = "windows")]
+            let _ = win.set_skip_taskbar(false);
             let (dw, dh) = effective_dashboard_size(bounds);
             let (dx, dy) = compute_dashboard_position(bounds);
             resize_window_and_webview(desktop, dw, dh, dx, dy);

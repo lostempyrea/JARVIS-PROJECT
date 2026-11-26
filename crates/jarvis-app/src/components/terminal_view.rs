@@ -147,7 +147,7 @@ pub fn TerminalView() -> Element {
                     class: "row-gap",
                     button {
                         class: "icon-btn",
-                        "data-tooltip": "Tab PowerShell mới",
+                        "data-tooltip": "New PowerShell Tab",
                         "data-tooltip-pos": "bottom-right",
                         onclick: {
                             let pm = pty_manager.clone();
@@ -162,7 +162,7 @@ pub fn TerminalView() -> Element {
                     }
                     button {
                         class: "icon-btn primary",
-                        "data-tooltip": "Tab AGY Agent mới",
+                        "data-tooltip": "New AGY Agent Tab",
                         "data-tooltip-pos": "bottom-right",
                         onclick: {
                             let pm = pty_manager.clone();
@@ -177,7 +177,7 @@ pub fn TerminalView() -> Element {
                     }
                     button {
                         class: "icon-btn danger",
-                        "data-tooltip": "Gửi Ctrl+C",
+                        "data-tooltip": "Send Ctrl+C",
                         "data-tooltip-pos": "bottom-right",
                         onclick: {
                             let pm = pty_manager.clone();
@@ -190,7 +190,7 @@ pub fn TerminalView() -> Element {
                     }
                     button {
                         class: "icon-btn",
-                        "data-tooltip": "Khởi động lại Tab",
+                        "data-tooltip": "Restart Tab",
                         "data-tooltip-pos": "bottom-right",
                         onclick: {
                             let pm = pty_manager.clone();
@@ -203,7 +203,7 @@ pub fn TerminalView() -> Element {
                     }
                     button {
                         class: "icon-btn",
-                        "data-tooltip": "Xóa màn hình PTY",
+                        "data-tooltip": "Clear Screen",
                         "data-tooltip-pos": "bottom-right",
                         onclick: {
                             let pm = pty_manager.clone();
@@ -216,7 +216,7 @@ pub fn TerminalView() -> Element {
                     }
                     button {
                         class: if show_drawer { "icon-btn primary" } else { "icon-btn" },
-                        "data-tooltip": if approval_count > 0 { format!("Phê duyệt AGY ({})", approval_count) } else { "Phê duyệt AGY & Tác vụ".into() },
+                        "data-tooltip": if approval_count > 0 { format!("AGY Approvals ({})", approval_count) } else { "AGY Approvals & Tasks".into() },
                         "data-tooltip-pos": "bottom-right",
                         onclick: move |_| {
                             let current_open = *drawer_open.read();
@@ -274,7 +274,7 @@ pub fn TerminalView() -> Element {
                                         e.stop_propagation();
                                         scroll_offset.set(0);
                                     },
-                                    "↓ Về cuối (-{offset})"
+                                    "↓ Jump to Bottom (-{offset})"
                                 }
                             }
                         }
@@ -402,7 +402,7 @@ pub fn TerminalView() -> Element {
                         class: "pty-drawer panel-card",
                         div {
                             class: "panel-header",
-                            span { class: "panel-title", "Phê duyệt AGY & Tác vụ" }
+                            span { class: "panel-title", "AGY Approvals & Tasks" }
                             button {
                                 class: "icon-btn danger",
                                 onclick: move |_| drawer_open.set(false),
@@ -414,7 +414,7 @@ pub fn TerminalView() -> Element {
                             style: "flex: 1;",
                             if pending_approvals.is_empty() {
                                 div { class: "muted", style: "padding: 8px; text-align: center;",
-                                    "Không có yêu cầu phê duyệt đang chờ."
+                                    "No pending approval requests."
                                 }
                             } else {
                                 for req in pending_approvals {
@@ -429,7 +429,7 @@ pub fn TerminalView() -> Element {
                                                 div {
                                                     class: "row-between",
                                                     span { class: "id-chip", "{req.tool_name}" }
-                                                    span { class: "muted", "{req.created_at}" }
+                                                    span { class: "muted", {format!("{}", req.created_at.with_timezone(&chrono::Local).format("%H:%M:%S"))} }
                                                 }
                                                 div { style: "font-family: var(--font-mono); font-size: 11px; word-break: break-all;",
                                                     "{req.command_or_args}"
@@ -439,7 +439,7 @@ pub fn TerminalView() -> Element {
                                                     style: "justify-content: flex-end;",
                                                     button {
                                                         class: "icon-btn danger",
-                                                        "data-tooltip": "Từ chối",
+                                                        "data-tooltip": "Reject",
                                                         onclick: {
                                                             let req_id_deny = req_id.clone();
                                                             let bd = broker_deny.clone();
@@ -454,7 +454,7 @@ pub fn TerminalView() -> Element {
                                                     }
                                                     button {
                                                         class: "icon-btn primary",
-                                                        "data-tooltip": "Phê duyệt",
+                                                        "data-tooltip": "Approve",
                                                         onclick: {
                                                             let req_id_app = req_id.clone();
                                                             let b = broker.clone();

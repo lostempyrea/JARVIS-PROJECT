@@ -1,6 +1,6 @@
 use crate::components::{
-    apply_audio_device_change, clear_dom_input, svg_close, svg_play, svg_plus, svg_refresh,
-    svg_stop, svg_voice, JarvisUiContext,
+    apply_audio_device_change, clear_dom_input, svg_close, svg_download, svg_play, svg_plus,
+    svg_refresh, svg_stop, svg_voice, JarvisUiContext,
 };
 use dioxus::events::Key;
 use dioxus::prelude::*;
@@ -19,19 +19,24 @@ pub fn VoicePanelView() -> Element {
         .unwrap_or_default();
 
     let mut wake_enabled = use_signal(|| cfg_voice.wake_word_enabled);
+    let mut auto_speak = use_signal(|| cfg_voice.auto_speak_replies);
+    let mut vad_threshold = use_signal(|| cfg_voice.vad_threshold_db);
     let mut wake_phrases = use_signal(|| cfg_voice.wake_phrases.clone());
     let mut new_phrase = use_signal(String::new);
     let mut stt_backend = use_signal(|| cfg_voice.stt_backend.clone());
+    let mut stt_lang = use_signal(|| cfg_voice.stt_language.clone().unwrap_or_else(|| "vi_en".to_string()));
     let mut tts_backend = use_signal(|| cfg_voice.tts_backend.clone());
     let mut tts_voice = use_signal(|| cfg_voice.tts_voice.clone());
     let mut input_device = use_signal(|| cfg_voice.input_device.clone().unwrap_or_default());
     let mut output_device = use_signal(|| cfg_voice.output_device.clone().unwrap_or_default());
     let mut input_devices = use_signal(|| VoicePipeline::list_input_devices().unwrap_or_default());
     let mut output_devices = use_signal(|| VoicePipeline::list_output_devices().unwrap_or_default());
-    let mut sample_text = use_signal(|| "Hệ thống JARVIS đã sẵn sàng phục vụ.".to_string());
+    let mut sample_text = use_signal(|| "JARVIS neural core online and ready to assist.".to_string());
     let mut status_msg = use_signal(|| Option::<String>::None);
 
     let ui = ctx.ui_state.read();
+    let binary_status = ui.binary_status.clone();
+    let install_status = ui.ffmpeg_install_status.clone();
     let mic_db = ui.mic_db;
     let voice_running = ui.voice_running;
     let ptt_active = ui.ptt_active;
@@ -84,7 +89,7 @@ pub fn VoicePanelView() -> Element {
     };
 
     rsx! {
-        div { class: "col-gap", style: "flex: 1; min-height: 0;",
+        div { class: "tab-scroll-page",
             div { class: "grid-2",
                 // Left: Real-Time Mic dB Meter & Hands-Free Controls
                 div { class: "panel-card",
@@ -102,6 +107,50 @@ pub fn VoicePanelView() -> Element {
                     }
                     div { class: "db-meter-track",
                         div { class: "db-meter-fill", style: "width: {meter_pct:.1}%;" }
+                    }
+
+                    div { class: "col-gap", style: "margin-top: 4px;",
+                        label { class: "muted", "VAD Noise Gate Sensitivity" }
+                        select {
+                            class: "hud-select",
+                            style: "width: 100%;",
+                            value: "{vad_threshold}",
+                            onchange: {
+                                let core = ctx.core.clone();
+                                let mut ui_sig = ctx.ui_state;
+                                move |evt: FormEvent| {
+                                    if let Ok(val) = evt.value().parse::<f32>() {
+                                        vad_threshold.set(val);
+                                        if let Ok(mut cfg) = core.config.write() {
+                                            cfg.voice.vad_threshold_db = val;
+                                            if let Err(err) = cfg.save() {
+                                                status_msg.set(Some(format!("Config save error: {err}")));
+                                                return;
+                                            }
+                                        }
+                                        match core.voice.apply_updated_config() {
+                                            Ok(restarted) => {
+                                                ui_sig.write().voice_running = core.voice.is_running();
+                                                let msg = if restarted {
+                                                    format!("VAD threshold set to {val} dB and pipeline reloaded.")
+                                                } else {
+                                                    format!("VAD threshold set to {val} dB.")
+                                                };
+                                                status_msg.set(Some(msg));
+                                            }
+                                            Err(err) => {
+                                                ui_sig.write().voice_running = core.voice.is_running();
+                                                status_msg.set(Some(format!("VAD config applied, but pipeline reload failed: {err}")));
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            option { value: "-38", "Sensitive (-38 dB — Quiet Room)" }
+                            option { value: "-35", "Balanced (-35 dB — Recommended)" }
+                            option { value: "-31", "Noise Filter (-31 dB — Fan / Background Noise)" }
+                            option { value: "-27", "Strong Filter (-27 dB — Noisy Environment)" }
+                        }
                     }
 
                     // Audio Device Selection (Input Microphone, Output Speaker, Refresh)
@@ -294,23 +343,44 @@ pub fn VoicePanelView() -> Element {
                 div { class: "panel-card",
                     div { class: "panel-header",
                         span { class: "panel-title", "Wake-Word & Inline Splitter" }
-                        button {
-                            class: if *wake_enabled.read() { "hud-btn active" } else { "hud-btn" },
-                            onclick: {
-                                let mut save = save_voice_cfg.clone();
-                                move |_| {
-                                    let next = !*wake_enabled.read();
-                                    wake_enabled.set(next);
-                                    save(
-                                        next,
-                                        wake_phrases.read().clone(),
-                                        stt_backend.read().clone(),
-                                        tts_backend.read().clone(),
-                                        tts_voice.read().clone(),
-                                    );
-                                }
-                            },
-                            if *wake_enabled.read() { "Wake-Word: ON" } else { "Wake-Word: OFF" }
+                        div { class: "row-gap",
+                            button {
+                                class: if *auto_speak.read() { "hud-btn active" } else { "hud-btn" },
+                                onclick: {
+                                    let core = ctx.core.clone();
+                                    move |_| {
+                                        let next = !*auto_speak.read();
+                                        auto_speak.set(next);
+                                        if let Ok(mut cfg) = core.config.write() {
+                                            cfg.voice.auto_speak_replies = next;
+                                            if let Err(err) = cfg.save() {
+                                                status_msg.set(Some(format!("Save error: {err}")));
+                                                return;
+                                            }
+                                        }
+                                        status_msg.set(Some(format!("Auto-Speak replies set to {next}")));
+                                    }
+                                },
+                                if *auto_speak.read() { "Auto-Speak: ON" } else { "Auto-Speak: OFF" }
+                            }
+                            button {
+                                class: if *wake_enabled.read() { "hud-btn active" } else { "hud-btn" },
+                                onclick: {
+                                    let mut save = save_voice_cfg.clone();
+                                    move |_| {
+                                        let next = !*wake_enabled.read();
+                                        wake_enabled.set(next);
+                                        save(
+                                            next,
+                                            wake_phrases.read().clone(),
+                                            stt_backend.read().clone(),
+                                            tts_backend.read().clone(),
+                                            tts_voice.read().clone(),
+                                        );
+                                    }
+                                },
+                                if *wake_enabled.read() { "Wake-Word: ON" } else { "Wake-Word: OFF" }
+                            }
                         }
                     }
 
@@ -349,7 +419,7 @@ pub fn VoicePanelView() -> Element {
                             class: "hud-input",
                             style: "flex: 1;",
                             spellcheck: "false",
-                            placeholder: "Add wake phrase (e.g. trợ lý jarvis)",
+                            placeholder: "Add wake phrase (e.g. hey jarvis, computer)",
                             oninput: move |evt| new_phrase.set(evt.value()),
                             onkeydown: {
                                 let mut save = save_voice_cfg.clone();
@@ -412,7 +482,7 @@ pub fn VoicePanelView() -> Element {
                 div { class: "panel-header",
                     span { class: "panel-title", "Cloud vs Offline STT / TTS Engines" }
                 }
-                div { class: "grid-3",
+                div { class: "grid-2",
                     div { class: "col-gap",
                         label { class: "muted", "STT Backend" }
                         select {
@@ -434,8 +504,52 @@ pub fn VoicePanelView() -> Element {
                             },
                             option { value: "groq_whisper", "Cloud: Groq Whisper (turbo)" }
                             option { value: "openai_whisper", "Cloud: OpenAI Whisper" }
-                            option { value: "local_http", "Offline: Local HTTP Whisper" }
-                            option { value: "whisper_cli", "Offline: whisper-cli ONNX/GGUF" }
+                            option { value: "whisper_cli", "Offline: whisper.cpp Local (VI + EN)" }
+                            option { value: "windows_speech", "Offline: Windows Speech (Built-in EN)" }
+                            option { value: "local_http", "Offline: Local HTTP Whisper Server" }
+                        }
+                    }
+
+                    div { class: "col-gap",
+                        label { class: "muted", "STT Language (EN / VI Only)" }
+                        select {
+                            class: "hud-select",
+                            value: "{stt_lang}",
+                            onchange: {
+                                let core = ctx.core.clone();
+                                let mut ui_sig = ctx.ui_state;
+                                move |evt: FormEvent| {
+                                    let val = evt.value();
+                                    stt_lang.set(val.clone());
+                                    let save_res = if let Ok(mut cfg) = core.config.write() {
+                                        cfg.voice.stt_language = Some(val.clone());
+                                        cfg.save()
+                                    } else {
+                                        return;
+                                    };
+                                    match save_res {
+                                        Ok(()) => match core.voice.apply_updated_config() {
+                                            Ok(restarted) => {
+                                                ui_sig.write().voice_running = core.voice.is_running();
+                                                let msg = if restarted {
+                                                    format!("STT language set to '{val}' and pipeline reloaded.")
+                                                } else {
+                                                    format!("STT language set to '{val}'.")
+                                                };
+                                                status_msg.set(Some(msg));
+                                            }
+                                            Err(err) => {
+                                                ui_sig.write().voice_running = core.voice.is_running();
+                                                status_msg.set(Some(format!("STT language saved, but pipeline reload failed: {err}")));
+                                            }
+                                        },
+                                        Err(err) => status_msg.set(Some(format!("Save error: {err}"))),
+                                    }
+                                }
+                            },
+                            option { value: "vi_en", "Bilingual: English & Vietnamese" }
+                            option { value: "vi", "Vietnamese Only (vi)" }
+                            option { value: "en", "English Only (en)" }
                         }
                     }
 
@@ -458,9 +572,9 @@ pub fn VoicePanelView() -> Element {
                                     );
                                 }
                             },
-                            option { value: "edge_tts", "Cloud: Edge-TTS Neural" }
+                            option { value: "edge_tts", "Cloud: Edge-TTS Neural (Auto-Fallback Offline)" }
                             option { value: "openai_tts", "Cloud: OpenAI TTS" }
-                            option { value: "windows_sapi", "Offline: Windows SAPI" }
+                            option { value: "windows_sapi", "Offline: Windows OneCore / SAPI (Microsoft An VI + EN)" }
                         }
                     }
 
@@ -485,9 +599,62 @@ pub fn VoicePanelView() -> Element {
                             },
                             option { value: "{DEFAULT_VIETNAMESE_FEMALE_VOICE}", "vi-VN-HoaiMyNeural (Female)" }
                             option { value: "{DEFAULT_VIETNAMESE_MALE_VOICE}", "vi-VN-NamMinhNeural (Male)" }
+                            option { value: "Microsoft An", "Offline: Microsoft An (Vietnamese - OneCore)" }
+                            option { value: "Microsoft David", "Offline: Microsoft David (English - OneCore/SAPI)" }
+                            option { value: "Microsoft Zira", "Offline: Microsoft Zira (English - OneCore/SAPI)" }
                             option { value: "en-US-AndrewNeural", "en-US-AndrewNeural" }
                             option { value: "en-US-AriaNeural", "en-US-AriaNeural" }
                             option { value: "alloy", "OpenAI: alloy" }
+                        }
+                    }
+                }
+
+                div { class: "row-between", style: "flex-wrap: wrap; gap: 8px; padding: 8px 10px; border-radius: 7px; background: rgba(4, 12, 24, 0.55); border: 1px solid rgba(0, 240, 255, 0.14);",
+                    div { class: "row-gap", style: "flex-wrap: wrap;",
+                        span {
+                            class: "chip",
+                            if binary_status.whisper_cli_installed && binary_status.whisper_model_installed {
+                                "Offline Whisper (VI+EN): READY"
+                            } else {
+                                "Offline Whisper (VI+EN): NOT INSTALLED"
+                            }
+                        }
+                        span { class: "chip", "Offline TTS (OneCore/SAPI): READY" }
+                        if let Some(prog) = install_status.as_ref() {
+                            span { class: "muted", "{prog}" }
+                        }
+                    }
+                    if !(binary_status.whisper_cli_installed && binary_status.whisper_model_installed) {
+                        button {
+                            class: "hud-btn primary",
+                            onclick: {
+                                let core = ctx.core.clone();
+                                let mut ui_sig = ctx.ui_state;
+                                move |_| {
+                                    let core = core.clone();
+                                    status_msg.set(Some("Downloading whisper-cli & ggml-base.bin (~145 MB)...".to_string()));
+                                    spawn(async move {
+                                        match core.binary_manager.ensure_whisper_offline().await {
+                                            Ok(_) => {
+                                                ui_sig.write().binary_status = core.binary_manager.check_status();
+                                                stt_backend.set("whisper_cli".to_string());
+                                                if let Ok(mut cfg) = core.config.write() {
+                                                    cfg.voice.stt_backend = "whisper_cli".to_string();
+                                                    let _ = cfg.save();
+                                                }
+                                                let _ = core.voice.apply_updated_config();
+                                                ui_sig.write().voice_running = core.voice.is_running();
+                                                status_msg.set(Some("Offline Whisper installed and activated!".to_string()));
+                                            }
+                                            Err(err) => {
+                                                status_msg.set(Some(format!("Offline Whisper install failed: {err}")));
+                                            }
+                                        }
+                                    });
+                                }
+                            },
+                            {svg_download()}
+                            "Install Offline Whisper (~145 MB)"
                         }
                     }
                 }
@@ -499,7 +666,7 @@ pub fn VoicePanelView() -> Element {
                         style: "flex: 1;",
                         spellcheck: "false",
                         placeholder: "Test TTS synthesis phrase...",
-                        initial_value: "Hệ thống JARVIS đã sẵn sàng phục vụ.",
+                        initial_value: "JARVIS neural core online and ready to assist.",
                         oninput: move |evt| sample_text.set(evt.value()),
                     }
                     button {
@@ -520,6 +687,51 @@ pub fn VoicePanelView() -> Element {
                         },
                         {svg_play()}
                         "Test Speak"
+                    }
+                    button {
+                        class: "hud-btn",
+                        onclick: {
+                            let core = ctx.core.clone();
+                            move |_| {
+                                let core = core.clone();
+                                let voice_cfg = core.config.read().map(|c| c.voice.clone()).unwrap_or_default();
+                                status_msg.set(Some("Recording 3s... Speak 'Hey Jarvis' now!".to_string()));
+                                spawn(async move {
+                                    core.voice.ptt_press();
+                                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                                    let wav = match core.voice.ptt_release_wav() {
+                                        Ok(Some(bytes)) => bytes,
+                                        Ok(None) => {
+                                            status_msg.set(Some("No audio recorded.".to_string()));
+                                            return;
+                                        }
+                                        Err(err) => {
+                                            status_msg.set(Some(format!("Recording error: {err}")));
+                                            return;
+                                        }
+                                    };
+                                    let enhanced = jarvis_core::voice::enhance_speech_wav_for_stt(&wav);
+                                    let secrets = core.secrets.as_ref();
+                                    match jarvis_core::voice::stt::create_stt_backend(&voice_cfg, secrets) {
+                                        Ok(stt) => {
+                                            match stt.transcribe_wav(&enhanced, voice_cfg.stt_language.as_deref()).await {
+                                                Ok(res) => {
+                                                    status_msg.set(Some(format!("STT Heard: '{}' ({}/{})", res.text, res.provider, res.model)));
+                                                }
+                                                Err(err) => {
+                                                    status_msg.set(Some(format!("STT transcription error: {err}")));
+                                                }
+                                            }
+                                        }
+                                        Err(err) => {
+                                            status_msg.set(Some(format!("STT backend error: {err}")));
+                                        }
+                                    }
+                                });
+                            }
+                        },
+                        {svg_voice()}
+                        "Test Mic & STT (3s)"
                     }
                     button {
                         class: "hud-btn danger",
