@@ -14,6 +14,7 @@ pub mod music;
 pub mod providers;
 pub mod secrets;
 pub mod tools;
+pub mod updater;
 pub mod voice;
 
 use agent::approval::ApprovalBroker;
@@ -46,17 +47,21 @@ pub use binary_manager::{check_binaries, locate_binary, BinaryError, BinaryStatu
 pub use channels::{
     ChannelError, ChannelState, ChannelStatusInfo, DiscordAdapter, ParsedEmail, TelegramAdapter,
 };
-pub use config::{ChannelsConfig, ProviderKind, SecurityMode, UiConfig, VoiceConfig};
+pub use config::{ChannelsConfig, ProviderKind, SecurityMode, UiConfig, UpdaterConfig, VoiceConfig};
 pub use db::{
     MemoryRecord, MessageRecord, PendingApprovalRecord, SessionRecord, TaskRecord, is_protected_session_id,
 };
-pub use events::{ApprovalDecision, ApprovalRequest, CoreEvent, ReactorState, RiskTier, UiCommand};
+pub use events::{
+    ApprovalDecision, ApprovalRequest, CoreEvent, ReactorState, RiskTier, UiCommand,
+    UpdateReleaseInfo,
+};
 pub use music::{
     GuildMusicQueue, LocalMusicPlayer, LocalMusicQueue, MusicError, MusicQueueSnapshot,
     MusicTarget, PlaybackState, TrackMeta,
 };
 pub use providers::traits::{ChatMessage, LlmProvider, MessageRole, StreamEvent, ToolCall, ToolDefinition};
 pub use secrets::{InMemorySecretStore, SecretError};
+pub use updater::{InstallMethod, UpdateError, UpdateManager};
 pub use voice::{
     AudioDeviceInfo, AudioPlayer, EdgeTtsBackend, GroqWhisperStt, LocalHttpWhisperStt,
     MicCapture, OfflineWhisperCliStt, OfflineWindowsSapiTts, OpenAiTtsBackend, OpenAiWhisperStt,
@@ -92,6 +97,7 @@ pub struct AppState {
     pub channels: Arc<ChannelManager>,
     pub ps_console: Arc<PowerShellConsoleManager>,
     pub pty: Arc<PtyManager>,
+    pub updater: Arc<UpdateManager>,
 }
 
 impl AppState {
@@ -178,6 +184,10 @@ impl AppState {
         );
         #[allow(unused_variables)]
         let ps_console = Arc::new(PowerShellConsoleManager::new(event_bus.clone()));
+        let updater = Arc::new(UpdateManager::new(
+            Arc::clone(&config_lock),
+            event_bus.clone(),
+        ));
 
         Self {
             config: config_lock,
@@ -194,6 +204,7 @@ impl AppState {
             channels,
             ps_console,
             pty,
+            updater,
         }
     }
 }

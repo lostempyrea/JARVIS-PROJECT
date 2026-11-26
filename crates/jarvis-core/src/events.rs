@@ -54,6 +54,21 @@ pub struct ApprovalRequest {
     pub created_at: DateTime<Utc>,
 }
 
+/// Metadata describing an available application release discovered by the auto-updater.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateReleaseInfo {
+    pub tag_name: String,
+    pub version: String,
+    pub title: String,
+    pub notes: String,
+    pub html_url: String,
+    pub published_at: Option<String>,
+    pub exe_download_url: String,
+    pub sha256_download_url: Option<String>,
+    pub expected_sha256: Option<String>,
+    pub size_bytes: Option<u64>,
+}
+
 /// Events emitted by `jarvis-core` to UI clients, tray/orb, and channels.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
@@ -107,6 +122,16 @@ pub enum CoreEvent {
     },
     BinaryInstallProgress {
         binary: String,
+        status: String,
+        bytes_downloaded: u64,
+        total_bytes: Option<u64>,
+    },
+    UpdateAvailable {
+        release: UpdateReleaseInfo,
+        manual_check: bool,
+    },
+    UpdateDownloadProgress {
+        version: String,
         status: String,
         bytes_downloaded: u64,
         total_bytes: Option<u64>,
