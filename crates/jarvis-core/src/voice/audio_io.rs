@@ -81,15 +81,146 @@ pub fn resample_linear_mono(
     let ratio = src_rate as f64 / dst_rate as f64;
     let out_len = ((mono.len() as f64) / ratio).round().max(1.0) as usize;
     let mut out = Vec::with_capacity(out_len);
-    for i in 0..out_len {
-        let src_pos = i as f64 * ratio;
-        let idx = src_pos.floor() as usize;
-        let frac = (src_pos - idx as f64) as f32;
-        let s0 = mono[idx.min(mono.len() - 1)];
-        let s1 = mono[(idx + 1).min(mono.len() - 1)];
-        out.push(s0 + (s1 - s0) * frac);
+    if src_rate > dst_rate {
+        // Box-filter decimation prevents high-frequency fan/room hiss from aliasing into 16kHz.
+        for i in 0..out_len {
+            let start = (i as f64 * ratio).floor() as usize;
+            let end = (((i + 1) as f64 * ratio).ceil() as usize).clamp(start + 1, mono.len());
+            let slice = &mono[start.min(mono.len() - 1)..end];
+            let sum: f32 = slice.iter().sum();
+            out.push(sum / slice.len() as f32);
+        }
+    } else {
+        for i in 0..out_len {
+            let src_pos = i as f64 * ratio;
+            let idx = src_pos.floor() as usize;
+            let frac = (src_pos - idx as f64) as f32;
+            let s0 = mono[idx.min(mono.len() - 1)];
+            let s1 = mono[(idx + 1).min(mono.len() - 1)];
+            out.push(s0 + (s1 - s0) * frac);
+        }
     }
     out
+}
+
+#[derive(Debug, Clone)]
+struct BiquadFilter {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    z1: f32,
+    z2: f32,
+}
+
+impl BiquadFilter {
+    fn highpass(sample_rate: f32, cutoff_hz: f32) -> Self {
+        let w0 = 2.0 * std::f32::consts::PI * cutoff_hz / sample_rate.max(1.0);
+        let cos_w0 = w0.cos();
+        let alpha = w0.sin() / (2.0 * std::f32::consts::FRAC_1_SQRT_2);
+        let a0 = 1.0 + alpha;
+        Self {
+            b0: ((1.0 + cos_w0) * 0.5) / a0,
+            b1: (-(1.0 + cos_w0)) / a0,
+            b2: ((1.0 + cos_w0) * 0.5) / a0,
+            a1: (-2.0 * cos_w0) / a0,
+            a2: (1.0 - alpha) / a0,
+            z1: 0.0,
+            z2: 0.0,
+        }
+    }
+
+    fn lowpass(sample_rate: f32, cutoff_hz: f32) -> Self {
+        let w0 = 2.0 * std::f32::consts::PI * cutoff_hz / sample_rate.max(1.0);
+        let cos_w0 = w0.cos();
+        let alpha = w0.sin() / (2.0 * std::f32::consts::FRAC_1_SQRT_2);
+        let a0 = 1.0 + alpha;
+        Self {
+            b0: ((1.0 - cos_w0) * 0.5) / a0,
+            b1: (1.0 - cos_w0) / a0,
+            b2: ((1.0 - cos_w0) * 0.5) / a0,
+            a1: (-2.0 * cos_w0) / a0,
+            a2: (1.0 - alpha) / a0,
+            z1: 0.0,
+            z2: 0.0,
+        }
+    }
+
+    #[inline]
+    fn process_sample(&mut self, x: f32) -> f32 {
+        let y = self.b0 * x + self.z1;
+        self.z1 = self.b1 * x - self.a1 * y + self.z2;
+        self.z2 = self.b2 * x - self.a2 * y;
+        y
+    }
+}
+
+/// Real-time speech-band DSP filter (95Hz HPF + 7.5kHz LPF + adaptive noise-floor expander).
+#[derive(Debug, Clone)]
+pub struct MicNoiseFilter {
+    hpf: BiquadFilter,
+    lpf: BiquadFilter,
+    noise_floor_rms: f32,
+    gain: f32,
+}
+
+impl MicNoiseFilter {
+    pub fn new(sample_rate: u32) -> Self {
+        let sr = sample_rate.max(8_000) as f32;
+        Self {
+            hpf: BiquadFilter::highpass(sr, 95.0),
+            lpf: BiquadFilter::lowpass(sr, 7500.0),
+            noise_floor_rms: 0.002,
+            gain: 1.0,
+        }
+    }
+
+    pub fn process_in_place(&mut self, samples: &mut [f32]) {
+        if samples.is_empty() {
+            return;
+        }
+        for s in samples.iter_mut() {
+            let hp = self.hpf.process_sample(*s);
+            *s = self.lpf.process_sample(hp);
+        }
+        let rms = compute_rms(samples);
+        if rms < self.noise_floor_rms * 1.8 {
+            self.noise_floor_rms = (self.noise_floor_rms * 0.96 + rms * 0.04).clamp(0.0003, 0.02);
+        }
+        let target_gain = if rms >= self.noise_floor_rms * 2.2 {
+            1.0
+        } else {
+            0.25
+        };
+        for s in samples.iter_mut() {
+            self.gain += (target_gain - self.gain) * 0.02;
+            *s = (*s * self.gain).clamp(-1.0, 1.0);
+        }
+    }
+}
+
+/// Peak-normalize quiet speech WAV buffers before sending to Whisper STT.
+pub fn enhance_speech_wav_for_stt(wav_bytes: &[u8]) -> Vec<u8> {
+    let Ok(mut reader) = hound::WavReader::new(std::io::Cursor::new(wav_bytes)) else {
+        return wav_bytes.to_vec();
+    };
+    let spec = reader.spec();
+    let samples: Vec<f32> = reader
+        .samples::<i16>()
+        .filter_map(Result::ok)
+        .map(|s| s as f32 / i16::MAX as f32)
+        .collect();
+    if samples.is_empty() {
+        return wav_bytes.to_vec();
+    }
+    let peak = samples.iter().fold(0.0_f32, |m, &s| m.max(s.abs()));
+    if !(0.003..0.65).contains(&peak) {
+        return wav_bytes.to_vec();
+    }
+    let gain = (0.72 / peak).min(8.0);
+    let scaled: Vec<f32> = samples.into_iter().map(|s| (s * gain).clamp(-1.0, 1.0)).collect();
+    super::vad::encode_wav_i16_mono(&scaled, spec.sample_rate).unwrap_or_else(|_| wav_bytes.to_vec())
 }
 
 /// List available audio input devices.
@@ -211,13 +342,15 @@ impl MicCapture {
             .spawn(move || {
                 let mut level_acc: Vec<f32> = Vec::with_capacity(1024);
                 let mut last_emit = Instant::now();
+                let mut noise_filter = MicNoiseFilter::new(TARGET_SAMPLE_RATE);
 
                 let mut handle_mono_f32 = move |raw: &[f32]| {
-                    let mono_16k =
+                    let mut mono_16k =
                         resample_linear_mono(raw, src_rate, src_channels, TARGET_SAMPLE_RATE);
                     if mono_16k.is_empty() {
                         return;
                     }
+                    noise_filter.process_in_place(&mut mono_16k);
                     if let Some(cb) = &level_callback {
                         level_acc.extend_from_slice(&mono_16k);
                         if last_emit.elapsed() >= LEVEL_EMIT_INTERVAL {
@@ -330,5 +463,32 @@ impl MicCapture {
 impl Drop for MicCapture {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mic_noise_filter_attenuates_50hz_hum_and_preserves_1khz_voice() {
+        let mut filter = MicNoiseFilter::new(TARGET_SAMPLE_RATE);
+        let hum: Vec<f32> = (0..3200)
+            .map(|i| 0.2 * (2.0 * std::f32::consts::PI * 50.0 * i as f32 / TARGET_SAMPLE_RATE as f32).sin())
+            .collect();
+        let orig_rms = compute_rms(&hum[1600..]);
+        let mut filtered_hum = hum.clone();
+        filter.process_in_place(&mut filtered_hum);
+        let att_rms = compute_rms(&filtered_hum[1600..]);
+        assert!(att_rms < orig_rms * 0.30, "expected 50Hz hum attenuation: orig={orig_rms}, att={att_rms}");
+
+        let mut filter2 = MicNoiseFilter::new(TARGET_SAMPLE_RATE);
+        let mut voice: Vec<f32> = (0..3200)
+            .map(|i| 0.2 * (2.0 * std::f32::consts::PI * 1000.0 * i as f32 / TARGET_SAMPLE_RATE as f32).sin())
+            .collect();
+        let voice_orig = compute_rms(&voice[1600..]);
+        filter2.process_in_place(&mut voice);
+        let voice_out = compute_rms(&voice[1600..]);
+        assert!(voice_out > voice_orig * 0.70, "expected 1kHz voice preserved: orig={voice_orig}, out={voice_out}");
     }
 }

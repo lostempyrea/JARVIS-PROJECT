@@ -12,8 +12,9 @@ pub mod vad;
 pub mod wake_word;
 
 pub use audio_io::{
-    compute_rms, compute_rms_db, list_input_devices, list_output_devices, resample_linear_mono,
-    rms_to_db, AudioDeviceInfo, MicCapture, MicLevelCallback, TARGET_CHANNELS, TARGET_SAMPLE_RATE,
+    compute_rms, compute_rms_db, enhance_speech_wav_for_stt, list_input_devices,
+    list_output_devices, resample_linear_mono, rms_to_db, AudioDeviceInfo, MicCapture,
+    MicLevelCallback, MicNoiseFilter, TARGET_CHANNELS, TARGET_SAMPLE_RATE,
 };
 pub use stt::{
     create_stt_backend, GroqWhisperStt, LocalHttpWhisperStt, OfflineWhisperCliStt,
@@ -27,7 +28,7 @@ pub use vad::{
     encode_wav_i16_mono, PttController, VadConfig, VadEvent, VadProcessor, VadState,
     DEFAULT_PRE_ROLL_MS,
 };
-pub use wake_word::{WakeMatch, WakeWordMatcher};
+pub use wake_word::{is_stop_speaking_command, WakeMatch, WakeWordMatcher};
 
 use crate::agent::AgentRuntime;
 use crate::config::{AppConfig, VoiceConfig};
@@ -232,6 +233,14 @@ impl VoicePipeline {
             .is_some_and(|h| h.mic.is_running() && !h.shutdown.load(Ordering::Relaxed))
     }
 
+    /// Update the active HUD session ID targeted by hands-free voice commands.
+    pub fn set_active_session(&self, session_id: impl Into<String>) {
+        *self
+            .active_session_id
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(session_id.into());
+    }
+
     /// Start the hands-free voice capture and processing pipeline for `session_id`.
     pub fn start(&self, session_id: impl Into<String>) -> VoiceResult<()> {
         self.stop();
@@ -250,6 +259,7 @@ impl VoicePipeline {
         let stt = create_stt_backend(&voice_cfg, self.secrets.as_ref())?;
         let tts = create_tts_backend(&voice_cfg, self.secrets.as_ref()).ok();
         let vad_cfg = VadConfig::from(&voice_cfg);
+        let vad_threshold = vad_cfg.threshold_db;
         let matcher = WakeWordMatcher::from(&voice_cfg);
         let listening_timeout = Duration::from_millis(voice_cfg.listening_timeout_ms.max(500));
 
@@ -272,6 +282,7 @@ impl VoicePipeline {
             .active_session_id
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = Some(session_id.clone());
+        let active_session_ref = Arc::clone(&self.active_session_id);
         let config_lock = Arc::clone(&self.config);
         let event_bus = self.event_bus.clone();
         let agent = self.agent.clone();
@@ -283,6 +294,9 @@ impl VoicePipeline {
         let task = tokio::spawn(async move {
             let mut vad = VadProcessor::new(vad_cfg);
             let mut timeout_tick = tokio::time::interval(Duration::from_millis(100));
+            let mut stt_backoff_until: Option<Instant> = None;
+            let mut last_err_emit: Option<Instant> = None;
+            let mut barge_in_frames: usize = 0;
 
             loop {
                 if shutdown_task.load(Ordering::Relaxed) {
@@ -310,6 +324,7 @@ impl VoicePipeline {
 
                         // Mute VAD while JARVIS TTS is speaking + 350ms echo tail so speaker output
                         // cannot self-trigger SpeechStarted or interrupt itself.
+                        let frame_db = crate::voice::vad::rms_db(&frame);
                         let muted_by_tts = {
                             let mut mute_guard = tts_mute_until.lock().unwrap_or_else(|e| e.into_inner());
                             evaluate_tts_mute_gate(
@@ -320,8 +335,23 @@ impl VoicePipeline {
                             )
                         };
                         if muted_by_tts {
-                            vad.reset();
-                            continue;
+                            let barge_in_threshold_db = (vad_threshold + 14.0).clamp(-26.0, -14.0);
+                            if player.is_playing() && frame_db >= barge_in_threshold_db {
+                                barge_in_frames += 1;
+                                if barge_in_frames >= 3 {
+                                    player.stop_playback();
+                                    *tts_mute_until.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                                    barge_in_frames = 0;
+                                } else {
+                                    continue;
+                                }
+                            } else {
+                                barge_in_frames = 0;
+                                vad.reset();
+                                continue;
+                            }
+                        } else {
+                            barge_in_frames = 0;
                         }
 
                         match vad.process_frame(&frame) {
@@ -341,12 +371,22 @@ impl VoicePipeline {
                                 }
                             }
                             Ok(VadEvent::SpeechEnded(wav_bytes)) => {
+                                if stt_backoff_until.is_some_and(|u| Instant::now() < u) {
+                                    continue;
+                                }
+                                let suppress = last_err_emit
+                                    .is_some_and(|t| t.elapsed() < Duration::from_secs(15));
                                 let current_voice_cfg = config_lock
                                     .read()
                                     .map(|c| c.voice.clone())
                                     .unwrap_or_else(|_| voice_cfg.clone());
-                                Self::process_utterance_internal(
-                                    &session_id,
+                                let current_session_id = active_session_ref
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner())
+                                    .clone()
+                                    .unwrap_or_else(|| session_id.clone());
+                                let ok = Self::process_utterance_internal(
+                                    &current_session_id,
                                     &wav_bytes,
                                     &current_voice_cfg,
                                     &matcher,
@@ -357,8 +397,18 @@ impl VoicePipeline {
                                     listening_timeout,
                                     &event_bus,
                                     &agent,
+                                    suppress,
                                 )
                                 .await;
+                                if !ok {
+                                    stt_backoff_until =
+                                        Some(Instant::now() + Duration::from_secs(5));
+                                    if !suppress {
+                                        last_err_emit = Some(Instant::now());
+                                    }
+                                } else {
+                                    stt_backoff_until = None;
+                                }
                             }
                             Err(err) => {
                                 tracing::warn!(error = %err, "VAD processing error");
@@ -569,8 +619,9 @@ impl VoicePipeline {
             }
         };
 
+        let enhanced_wav = enhance_speech_wav_for_stt(wav);
         let stt_res = match stt
-            .transcribe_wav(wav, voice_cfg.stt_language.as_deref())
+            .transcribe_wav(&enhanced_wav, voice_cfg.stt_language.as_deref())
             .await
         {
             Ok(res) => res,
@@ -594,6 +645,19 @@ impl VoicePipeline {
             return Ok(());
         }
 
+        if is_stop_speaking_command(&txt) {
+            self.stop_speaking();
+            self.event_bus.publish(CoreEvent::VoiceTranscript {
+                session_id: session_id.to_string(),
+                text: txt,
+                is_command: false,
+            });
+            self.event_bus.publish(CoreEvent::ReactorStateChanged {
+                state: ReactorState::Idle,
+            });
+            return Ok(());
+        }
+
         self.event_bus.publish(CoreEvent::VoiceTranscript {
             session_id: session_id.to_string(),
             text: txt.clone(),
@@ -608,10 +672,19 @@ impl VoicePipeline {
             .handle_user_prompt(session_id, "voice_ptt", &txt)
             .await
         {
-            Ok(_) => {
+            Ok(outcome) => {
                 self.event_bus.publish(CoreEvent::ReactorStateChanged {
                     state: ReactorState::Idle,
                 });
+                let spoken = clean_text_for_tts(&outcome.final_text);
+                if !spoken.is_empty() {
+                    let tts_backend = create_tts_backend(&voice_cfg, self.secrets.as_ref()).ok();
+                    if let Some(audio) =
+                        synthesize_with_fallback(tts_backend.as_ref(), &spoken, &voice_cfg).await
+                    {
+                        let _ = self.player().enqueue_audio_bytes(audio);
+                    }
+                }
                 Ok(())
             }
             Err(err) => {
@@ -666,17 +739,31 @@ impl VoicePipeline {
             .voice
             .clone();
 
-        let tts = create_tts_backend(&voice_cfg, self.secrets.as_ref())?;
-        let audio_bytes = tts
-            .synthesize(
-                text,
-                &voice_cfg.tts_voice,
-                voice_cfg.tts_rate,
-                voice_cfg.tts_pitch,
-            )
-            .await?;
+        let tts = create_tts_backend(&voice_cfg, self.secrets.as_ref()).ok();
+        if let Some(audio) = synthesize_with_fallback(tts.as_ref(), text, &voice_cfg).await {
+            self.player().enqueue_audio_bytes(audio)
+        } else {
+            Err(VoiceError::Tts("all TTS backends failed".into()))
+        }
+    }
 
-        self.player().enqueue_audio_bytes(audio_bytes)
+    /// Speak a reply text if auto_speak_replies is enabled and the text is not empty.
+    pub async fn speak_reply(&self, raw_text: &str) {
+        let voice_cfg = match self.config.read() {
+            Ok(c) => c.voice.clone(),
+            Err(_) => return,
+        };
+        if !voice_cfg.auto_speak_replies {
+            return;
+        }
+        let spoken = clean_text_for_tts(raw_text);
+        if spoken.is_empty() {
+            return;
+        }
+        let tts = create_tts_backend(&voice_cfg, self.secrets.as_ref()).ok();
+        if let Some(audio) = synthesize_with_fallback(tts.as_ref(), &spoken, &voice_cfg).await {
+            let _ = self.player().enqueue_audio_bytes(audio);
+        }
     }
 
     /// Immediately halt active TTS playback (barge-in).
@@ -686,6 +773,83 @@ impl VoicePipeline {
         }
     }
 
+    pub fn is_speaking(&self) -> bool {
+        self.player.get().is_some_and(|p| p.is_playing())
+    }
+}
+
+fn clean_text_for_tts(text: &str) -> String {
+    let cleaned = text.replace(['*', '#', '`'], "");
+    if cleaned.chars().filter(|c| c.is_alphanumeric()).count() == 0 {
+        return String::new();
+    }
+    cleaned
+}
+
+async fn synthesize_with_fallback(
+    tts: Option<&Arc<dyn TtsBackend>>,
+    text: &str,
+    voice_cfg: &VoiceConfig,
+) -> Option<Vec<u8>> {
+    let tts_backend = match tts {
+        Some(b) => b,
+        None => {
+            if voice_cfg.tts_backend != "windows_sapi" {
+                tracing::warn!("Primary TTS backend missing, falling back to windows_sapi");
+                return OfflineWindowsSapiTts::new()
+                    .synthesize(text, &voice_cfg.tts_voice, voice_cfg.tts_rate, voice_cfg.tts_pitch)
+                    .await
+                    .ok();
+            }
+            return None;
+        }
+    };
+    match tts_backend
+        .synthesize(
+            text,
+            &voice_cfg.tts_voice,
+            voice_cfg.tts_rate,
+            voice_cfg.tts_pitch,
+        )
+        .await
+    {
+        Ok(bytes) => Some(bytes),
+        Err(err) => {
+            tracing::warn!(error = %err, "Voice TTS synthesis failed");
+            if tts_backend.provider_name() != "windows_sapi" {
+                OfflineWindowsSapiTts::new()
+                    .synthesize(text, &voice_cfg.tts_voice, voice_cfg.tts_rate, voice_cfg.tts_pitch)
+                    .await
+                    .ok()
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn is_whisper_silence_hallucination(text: &str) -> bool {
+    let t = text.trim().to_lowercase();
+    if t.is_empty() {
+        return true;
+    }
+    let known_hallucinations = [
+        "subtitles by the amara.org community",
+        "thank you for watching",
+        "please subscribe",
+        "like and subscribe",
+        "mời các bạn theo dõi",
+        "cảm ơn các bạn đã theo dõi",
+    ];
+    for h in &known_hallucinations {
+        if t.contains(h) {
+            return true;
+        }
+    }
+    false
+}
+
+impl VoicePipeline {
     #[allow(clippy::too_many_arguments)]
     async fn process_utterance_internal(
         session_id: &str,
@@ -699,24 +863,52 @@ impl VoicePipeline {
         listening_timeout: Duration,
         event_bus: &EventBus,
         agent: &AgentRuntime,
-    ) {
+        suppress_error_banner: bool,
+    ) -> bool {
+        let enhanced_wav = enhance_speech_wav_for_stt(wav_bytes);
         let stt_res = match stt
-            .transcribe_wav(wav_bytes, voice_cfg.stt_language.as_deref())
+            .transcribe_wav(&enhanced_wav, voice_cfg.stt_language.as_deref())
             .await
         {
             Ok(r) => r,
             Err(err) => {
                 tracing::warn!(error = %err, "Voice STT transcription failed");
-                event_bus.publish(CoreEvent::Error {
-                    session_id: Some(session_id.to_string()),
-                    message: format!("Voice STT failed: {err}"),
-                });
+                if !suppress_error_banner {
+                    event_bus.publish(CoreEvent::Error {
+                        session_id: Some(session_id.to_string()),
+                        message: format!("Voice STT failed: {err}"),
+                    });
+                }
                 event_bus.publish(CoreEvent::ReactorStateChanged {
                     state: ReactorState::Idle,
                 });
-                return;
+                return false;
             }
         };
+
+        if is_stop_speaking_command(&stt_res.text) {
+            player.stop_playback();
+            *listening_until.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            event_bus.publish(CoreEvent::VoiceTranscript {
+                session_id: session_id.to_string(),
+                text: stt_res.text.trim().to_string(),
+                is_command: false,
+            });
+            event_bus.publish(CoreEvent::ReactorStateChanged {
+                state: ReactorState::Idle,
+            });
+            return true;
+        }
+
+        if is_whisper_silence_hallucination(&stt_res.text) {
+            let in_window = listening_until
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some_and(|d| Instant::now() < d);
+            if !in_window {
+                return true;
+            }
+        }
 
         let action = {
             let mut guard = listening_until.lock().unwrap_or_else(|e| e.into_inner());
@@ -741,6 +933,12 @@ impl VoicePipeline {
                 event_bus.publish(CoreEvent::ReactorStateChanged {
                     state: ReactorState::Listening,
                 });
+                if let Some(audio) = synthesize_with_fallback(tts, "Yes, I'm listening.", voice_cfg).await {
+                    let _ = player.enqueue_audio_bytes(audio);
+                }
+                let mut guard = listening_until.lock().unwrap_or_else(|e| e.into_inner());
+                let base = guard.unwrap_or_else(Instant::now);
+                *guard = Some(base.max(Instant::now()) + listening_timeout + Duration::from_secs(3));
             }
             TranscriptAction::DispatchCommand(command) => {
                 event_bus.publish(CoreEvent::VoiceTranscript {
@@ -757,26 +955,10 @@ impl VoicePipeline {
                         event_bus.publish(CoreEvent::ReactorStateChanged {
                             state: ReactorState::Idle,
                         });
-                        if !outcome.final_text.trim().is_empty() {
-                            if let Some(tts_backend) = tts {
-                                match tts_backend
-                                    .synthesize(
-                                        &outcome.final_text,
-                                        &voice_cfg.tts_voice,
-                                        voice_cfg.tts_rate,
-                                        voice_cfg.tts_pitch,
-                                    )
-                                    .await
-                                {
-                                    Ok(audio) => {
-                                        if let Err(err) = player.enqueue_audio_bytes(audio) {
-                                            tracing::warn!(error = %err, "Failed to enqueue TTS audio");
-                                        }
-                                    }
-                                    Err(err) => {
-                                        tracing::warn!(error = %err, "Voice TTS synthesis failed");
-                                    }
-                                }
+                        let spoken = clean_text_for_tts(&outcome.final_text);
+                        if !spoken.is_empty() {
+                            if let Some(audio) = synthesize_with_fallback(tts, &spoken, voice_cfg).await {
+                                let _ = player.enqueue_audio_bytes(audio);
                             }
                         }
                     }
@@ -792,6 +974,7 @@ impl VoicePipeline {
                 }
             }
         }
+        true
     }
 }
 

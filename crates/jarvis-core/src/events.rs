@@ -135,6 +135,10 @@ pub enum CoreEvent {
         session_id: Option<String>,
         message: String,
     },
+    TurnComplete {
+        session_id: String,
+        full_text: String,
+    },
 }
 
 /// Commands sent from UI / channel adapters into `jarvis-core`.

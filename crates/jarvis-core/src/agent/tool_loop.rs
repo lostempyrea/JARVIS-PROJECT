@@ -217,7 +217,8 @@ impl ToolLoop {
                 pending_calls.clone(),
             ));
 
-            for tc in pending_calls {
+            let mut call_iter = pending_calls.into_iter();
+            while let Some(tc) = call_iter.next() {
                 if let Err(loop_err) = self.guard.record_tool_call(&tc.name, &tc.arguments) {
                     self.event_bus.publish(CoreEvent::Error {
                         session_id: Some(ctx.session_id.clone()),
@@ -262,10 +263,53 @@ impl ToolLoop {
                     });
 
                     if !decision.is_approved() {
-                        ToolResult::err(format!(
-                            "Action '{}' was not approved ({decision:?}). Reason: {}",
-                            tc.name, classification.reason
-                        ))
+                        let err_output = format!(
+                            "Action '{}' was not approved ({decision:?}). User denied execution — task stopped.",
+                            tc.name
+                        );
+                        let preview: String = err_output.chars().take(240).collect();
+                        self.event_bus.publish(CoreEvent::ToolCallCompleted {
+                            session_id: ctx.session_id.clone(),
+                            tool_call_id: tc.id.clone(),
+                            tool_name: tc.name.clone(),
+                            success: false,
+                            output_preview: preview,
+                        });
+                        messages.push(ChatMessage::tool_result(&tc.id, &tc.name, err_output));
+
+                        for rem_tc in call_iter {
+                            messages.push(ChatMessage::tool_result(
+                                &rem_tc.id,
+                                &rem_tc.name,
+                                "Skipped because user denied permission.",
+                            ));
+                        }
+
+                        self.approval_broker.deny_all_for_session(&ctx.session_id);
+
+                        let stop_text = match decision {
+                            crate::events::ApprovalDecision::TimedOut => format!(
+                                "Approval request for `{}` timed out, so the task was cancelled.",
+                                tc.name
+                            ),
+                            _ => format!(
+                                "Permission to run `{}` was denied, so I have stopped this task. Let me know how you would like to proceed.",
+                                tc.name
+                            ),
+                        };
+                        self.event_bus.publish(CoreEvent::TextDelta {
+                            session_id: ctx.session_id.clone(),
+                            delta: stop_text.clone(),
+                        });
+                        messages.push(ChatMessage::assistant(stop_text.clone()));
+                        self.event_bus.publish(CoreEvent::ReactorStateChanged {
+                            state: ReactorState::Idle,
+                        });
+                        return Ok(ToolLoopOutcome {
+                            final_text: stop_text,
+                            iterations: iter,
+                            messages,
+                        });
                     } else {
                         self.execute_tool(&tc, ctx).await
                     }
@@ -450,5 +494,74 @@ mod tests {
             .unwrap_err();
 
         assert!(matches!(err, LoopError::DuplicateToolCall { count: 3, .. }));
+    }
+
+    #[tokio::test]
+    async fn denied_delegate_to_agy_stops_immediately_without_re_prompting() {
+        let dir = TempDir::new().unwrap();
+        let provider = Arc::new(MockProvider::new(vec![
+            vec![
+                StreamEvent::ToolCallComplete(ToolCall {
+                    id: "c1".to_string(),
+                    name: "delegate_to_agy".to_string(),
+                    arguments: serde_json::json!({"prompt": "fix bug"}),
+                }),
+                StreamEvent::Done,
+            ],
+            vec![
+                StreamEvent::ToolCallComplete(ToolCall {
+                    id: "c2".to_string(),
+                    name: "delegate_to_agy".to_string(),
+                    arguments: serde_json::json!({"prompt": "retry"}),
+                }),
+                StreamEvent::Done,
+            ],
+            vec![
+                StreamEvent::ToolCallComplete(ToolCall {
+                    id: "c3".to_string(),
+                    name: "pty_terminal".to_string(),
+                    arguments: serde_json::json!({"action": "open_agy", "prompt": "fix bug"}),
+                }),
+                StreamEvent::Done,
+            ],
+        ]));
+
+        let bus = EventBus::new(64);
+        let mut rx = bus.subscribe();
+        let ctx = make_ctx(&dir, bus.clone());
+        let broker = Arc::new(ApprovalBroker::new(bus.clone(), None));
+        let registry = Arc::new(ToolRegistry::with_builtins());
+
+        let mut loop_runner = ToolLoop::new(provider, registry, broker.clone(), bus.clone());
+        let handle = tokio::spawn(async move {
+            loop_runner.run(vec![ChatMessage::user("run agy")], "mock", &ctx).await
+        });
+
+        // Wait for ApprovalRequested event for delegate_to_agy
+        let req = loop {
+            match tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv()).await {
+                Ok(Ok(CoreEvent::ApprovalRequested(r))) => {
+                    assert_eq!(r.tool_name, "delegate_to_agy");
+                    break r;
+                }
+                Ok(_) => {}
+                Err(_) => panic!("timed out waiting for ApprovalRequested"),
+            }
+        };
+
+        broker.resolve(&req.id, crate::events::ApprovalDecision::Denied);
+
+        let outcome = handle.await.unwrap().unwrap();
+        assert_eq!(outcome.iterations, 1);
+        assert!(outcome.final_text.contains("Permission to run `delegate_to_agy` was denied"));
+        assert!(broker.list_pending_requests().is_empty());
+
+        // Verify no second ApprovalRequested event exists in rx
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        while let Ok(ev) = rx.try_recv() {
+            if let CoreEvent::ApprovalRequested(r) = ev {
+                panic!("unexpected second approval request: {:?}", r);
+            }
+        }
     }
 }

@@ -1148,6 +1148,15 @@ impl Drop for TempWavGuard {
 }
 
 #[cfg(windows)]
+fn text_has_vietnamese_diacritics(text: &str) -> bool {
+    text.chars().any(|c| {
+        matches!(c, 'ă' | 'â' | 'đ' | 'ê' | 'ô' | 'ơ' | 'ư' | 'Ă' | 'Â' | 'Đ' | 'Ê' | 'Ô' | 'Ơ' | 'Ư')
+            || ('\u{00C0}'..='\u{024F}').contains(&c)
+            || ('\u{1E00}'..='\u{1EFF}').contains(&c)
+    })
+}
+
+#[cfg(windows)]
 fn ps_utf8_expr(text: &str) -> String {
     let bytes_list = text
         .as_bytes()
@@ -1188,30 +1197,73 @@ impl TtsBackend for OfflineWindowsSapiTts {
             let out_wav = std::env::temp_dir().join(format!("jarvis_sapi_{}.wav", Uuid::new_v4()));
             let _guard = TempWavGuard(out_wav.clone());
 
+            let prefer_vi = text_has_vietnamese_diacritics(text) || voice.trim().to_ascii_lowercase().starts_with("vi") || voice.to_ascii_lowercase().contains("an");
+            let winrt_rate = rate.clamp(0.5, 3.0);
             let sapi_rate = ((rate - 1.0) * 5.0).round().clamp(-10.0, 10.0) as i32;
+            let req_voice_expr = ps_utf8_expr(voice.trim());
             let text_expr = ps_utf8_expr(text);
             let path_expr = ps_utf8_expr(&out_wav.to_string_lossy());
-            let voice_block = if voice.trim().is_empty() {
-                String::new()
-            } else {
-                let voice_expr = ps_utf8_expr(voice.trim());
-                format!(
-                    "$reqVoice = {voice_expr}; \
-                     $matched = $synth.GetInstalledVoices() | Where-Object {{ $_.Enabled -and ($_.VoiceInfo.Name -like \"*$reqVoice*\" -or $_.VoiceInfo.Culture.Name -eq $reqVoice) }} | Select-Object -First 1; \
-                     if ($null -ne $matched) {{ $synth.SelectVoice($matched.VoiceInfo.Name) }}; "
-                )
-            };
+            let prefer_vi_ps = if prefer_vi { "$true" } else { "$false" };
 
             let script = format!(
-                "Add-Type -AssemblyName System.Speech; \
-                 $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer; \
+                "$text = {text_expr}; \
+                 $outPath = {path_expr}; \
+                 $reqVoice = {req_voice_expr}; \
+                 $preferVi = {prefer_vi_ps}; \
+                 $done = $false; \
                  try {{ \
-                     $synth.Rate = {sapi_rate}; \
-                     {voice_block}\
-                     $synth.SetOutputToWaveFile({path_expr}); \
-                     $synth.Speak({text_expr}); \
-                 }} finally {{ \
-                     $synth.Dispose(); \
+                     Add-Type -AssemblyName System.Runtime.WindowsRuntime; \
+                     $null = [Windows.Media.SpeechSynthesis.SpeechSynthesizer, Windows.Media.SpeechSynthesis, ContentType = WindowsRuntime]; \
+                     $null = [Windows.Storage.Streams.IInputStream, Windows.Storage.Streams, ContentType = WindowsRuntime]; \
+                     $asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {{ \
+                         $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' \
+                     }})[0]; \
+                     $synth = New-Object Windows.Media.SpeechSynthesis.SpeechSynthesizer; \
+                     try {{ \
+                         $voices = [Windows.Media.SpeechSynthesis.SpeechSynthesizer]::AllVoices; \
+                         $picked = $null; \
+                         if ($reqVoice -ne '' -and $reqVoice -notlike '*Neural*') {{ \
+                             $picked = $voices | Where-Object {{ $_.DisplayName -like \"*$reqVoice*\" -or $_.Language -eq $reqVoice }} | Select-Object -First 1; \
+                         }} \
+                         if ($null -eq $picked -and $preferVi) {{ \
+                             $picked = $voices | Where-Object {{ $_.Language -like 'vi*' }} | Select-Object -First 1; \
+                         }} \
+                         if ($null -eq $picked -and -not $preferVi) {{ \
+                             $picked = $voices | Where-Object {{ $_.Language -like 'en*' }} | Select-Object -First 1; \
+                         }} \
+                         if ($null -ne $picked) {{ $synth.Voice = $picked; }} \
+                         $synth.Options.SpeakingRate = {winrt_rate}; \
+                         $asTask = $asTaskGeneric.MakeGenericMethod([Windows.Media.SpeechSynthesis.SpeechSynthesisStream]); \
+                         $netTask = $asTask.Invoke($null, @($synth.SynthesizeTextToStreamAsync($text))); \
+                         $netTask.Wait(-1) | Out-Null; \
+                         $stream = $netTask.Result; \
+                         $netStream = [System.IO.WindowsRuntimeStreamExtensions]::AsStreamForRead($stream.GetInputStreamAt(0)); \
+                         $fs = [System.IO.File]::Create($outPath); \
+                         try {{ $netStream.CopyTo($fs); }} finally {{ $fs.Dispose(); $netStream.Dispose(); $stream.Dispose(); }} \
+                         if ((Test-Path $outPath) -and (Get-Item $outPath).Length -gt 44) {{ $done = $true; }} \
+                     }} finally {{ \
+                         $synth.Dispose(); \
+                     }} \
+                 }} catch {{}} \
+                 if (-not $done) {{ \
+                     Add-Type -AssemblyName System.Speech; \
+                     $sapi = New-Object System.Speech.Synthesis.SpeechSynthesizer; \
+                     try {{ \
+                         $sapi.Rate = {sapi_rate}; \
+                         $installed = $sapi.GetInstalledVoices() | Where-Object {{ $_.Enabled }}; \
+                         $matched = $null; \
+                         if ($reqVoice -ne '' -and $reqVoice -notlike '*Neural*') {{ \
+                             $matched = $installed | Where-Object {{ $_.VoiceInfo.Name -like \"*$reqVoice*\" -or $_.VoiceInfo.Culture.Name -eq $reqVoice }} | Select-Object -First 1; \
+                         }} \
+                         if ($null -eq $matched -and $preferVi) {{ \
+                             $matched = $installed | Where-Object {{ $_.VoiceInfo.Culture.Name -like 'vi*' }} | Select-Object -First 1; \
+                         }} \
+                         if ($null -ne $matched) {{ $sapi.SelectVoice($matched.VoiceInfo.Name); }} \
+                         $sapi.SetOutputToWaveFile($outPath); \
+                         $sapi.Speak($text); \
+                     }} finally {{ \
+                         $sapi.Dispose(); \
+                     }} \
                  }}"
             );
 
@@ -1248,6 +1300,22 @@ impl TtsBackend for OfflineWindowsSapiTts {
             }
             Ok(wav_bytes)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn test_offline_windows_sapi_tts_synthesis() {
+        let tts = OfflineWindowsSapiTts::new();
+        let result = tts.synthesize("Xin chào, tôi là Jarvis.", "vi-VN-NamMinhNeural", 1.0, 0.0).await;
+        assert!(result.is_ok(), "TTS synthesis failed: {:?}", result.err());
+        let wav_bytes = result.unwrap();
+        assert!(wav_bytes.len() > 1000, "WAV bytes too short: {}", wav_bytes.len());
+        assert_eq!(&wav_bytes[0..4], b"RIFF", "Not a valid WAV/RIFF file");
     }
 }
 

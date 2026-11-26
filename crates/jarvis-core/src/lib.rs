@@ -48,7 +48,7 @@ pub use channels::{
 };
 pub use config::{ChannelsConfig, ProviderKind, SecurityMode, UiConfig, VoiceConfig};
 pub use db::{
-    MemoryRecord, MessageRecord, PendingApprovalRecord, SessionRecord, TaskRecord,
+    MemoryRecord, MessageRecord, PendingApprovalRecord, SessionRecord, TaskRecord, is_protected_session_id,
 };
 pub use events::{ApprovalDecision, ApprovalRequest, CoreEvent, ReactorState, RiskTier, UiCommand};
 pub use music::{

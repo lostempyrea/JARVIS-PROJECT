@@ -3,7 +3,7 @@
 //! All methods lock the internal `std::sync::Mutex<Connection>` strictly inside
 //! synchronous scopes so a `MutexGuard` is never held across an `.await` point.
 
-use chrono::Utc;
+use chrono::Local;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -11,6 +11,14 @@ use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
 /// Errors returned by [`Database`] operations.
+pub fn is_protected_session_id(id: &str, channel: Option<&str>) -> bool {
+    let lower = id.trim().to_ascii_lowercase();
+    lower == "hud-main"
+        || lower == "telegram"
+        || lower.starts_with("telegram-")
+        || channel.is_some_and(|ch| ch.trim().eq_ignore_ascii_case("telegram"))
+}
+
 #[derive(Debug, Error)]
 pub enum DbError {
     #[error("sqlite error: {0}")]
@@ -214,7 +222,7 @@ impl Database {
         title: &str,
         channel: &str,
     ) -> Result<SessionRecord, DbError> {
-        let now = Utc::now().to_rfc3339();
+        let now = Local::now().to_rfc3339();
         let rec = SessionRecord {
             id: id.to_string(),
             title: title.to_string(),
@@ -269,7 +277,15 @@ impl Database {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare(
                 "SELECT id, title, channel, created_at, updated_at
-                 FROM sessions ORDER BY updated_at DESC LIMIT ?1",
+                 FROM sessions
+                 ORDER BY
+                     CASE
+                         WHEN id = 'hud-main' THEN 0
+                         WHEN channel = 'telegram' OR id LIKE 'telegram%' THEN 1
+                         ELSE 2
+                     END ASC,
+                     updated_at DESC
+                 LIMIT ?1",
             )?;
             let rows = stmt.query_map(params![limit as i64], |row| {
                 Ok(SessionRecord {
@@ -289,7 +305,11 @@ impl Database {
     }
 
     pub fn update_session_title(&self, id: &str, title: &str) -> Result<bool, DbError> {
-        let now = Utc::now().to_rfc3339();
+        let existing = self.get_session(id)?;
+        if is_protected_session_id(id, existing.as_ref().map(|s| s.channel.as_str())) {
+            return Ok(false);
+        }
+        let now = Local::now().to_rfc3339();
         self.with_conn(|conn| {
             let changed = conn.execute(
                 "UPDATE sessions SET title = ?1, updated_at = ?2 WHERE id = ?3",
@@ -300,9 +320,29 @@ impl Database {
     }
 
     pub fn delete_session(&self, id: &str) -> Result<bool, DbError> {
+        let existing = self.get_session(id)?;
+        if is_protected_session_id(id, existing.as_ref().map(|s| s.channel.as_str())) {
+            return Ok(false);
+        }
         self.with_conn(|conn| {
             let changed = conn.execute("DELETE FROM sessions WHERE id = ?1", params![id])?;
             Ok(changed > 0)
+        })
+    }
+
+    /// Delete all messages belonging to `session_id` while keeping the session record itself.
+    pub fn clear_session_messages(&self, session_id: &str) -> Result<usize, DbError> {
+        let now = Local::now().to_rfc3339();
+        self.with_conn(|conn| {
+            let deleted = conn.execute(
+                "DELETE FROM messages WHERE session_id = ?1",
+                params![session_id],
+            )?;
+            let _ = conn.execute(
+                "UPDATE sessions SET updated_at = ?2 WHERE id = ?1",
+                params![session_id, now],
+            );
+            Ok(deleted)
         })
     }
 
@@ -319,7 +359,7 @@ impl Database {
         tool_calls_json: Option<&str>,
         tool_call_id: Option<&str>,
     ) -> Result<MessageRecord, DbError> {
-        let now = Utc::now().to_rfc3339();
+        let now = Local::now().to_rfc3339();
         let rec = MessageRecord {
             id: id.to_string(),
             session_id: session_id.to_string(),
@@ -403,7 +443,7 @@ impl Database {
         status: &str,
         payload_json: Option<&str>,
     ) -> Result<TaskRecord, DbError> {
-        let now = Utc::now().to_rfc3339();
+        let now = Local::now().to_rfc3339();
         let rec = TaskRecord {
             id: id.to_string(),
             session_id: session_id.map(ToString::to_string),
@@ -502,7 +542,7 @@ impl Database {
     }
 
     pub fn update_task_status(&self, id: &str, status: &str) -> Result<bool, DbError> {
-        let now = Utc::now().to_rfc3339();
+        let now = Local::now().to_rfc3339();
         self.with_conn(|conn| {
             let changed = conn.execute(
                 "UPDATE tasks SET status = ?1, updated_at = ?2 WHERE id = ?3",
@@ -531,7 +571,7 @@ impl Database {
         args_json: &str,
         reason: &str,
     ) -> Result<PendingApprovalRecord, DbError> {
-        let now = Utc::now().to_rfc3339();
+        let now = Local::now().to_rfc3339();
         let rec = PendingApprovalRecord {
             id: id.to_string(),
             session_id: session_id.to_string(),
@@ -570,7 +610,7 @@ impl Database {
         status: &str,
         decision: &str,
     ) -> Result<bool, DbError> {
-        let now = Utc::now().to_rfc3339();
+        let now = Local::now().to_rfc3339();
         self.with_conn(|conn| {
             let changed = conn.execute(
                 "UPDATE pending_approvals
@@ -648,7 +688,7 @@ impl Database {
         tags: &str,
         source: &str,
     ) -> Result<MemoryRecord, DbError> {
-        let now = Utc::now().to_rfc3339();
+        let now = Local::now().to_rfc3339();
         self.with_conn(|conn| {
             conn.execute(
                 "INSERT INTO memories (key, content, tags, source, created_at, updated_at)
@@ -903,5 +943,59 @@ mod tests {
         for (idx, msg) in msgs.iter().enumerate() {
             assert_eq!(msg.content, format!("message-{}", idx + 15));
         }
+    }
+
+    #[test]
+    fn clear_session_messages_keeps_session_and_preserves_other_sessions() {
+        let db = Database::open_in_memory().unwrap();
+        db.create_session("s1", "Session 1", "desktop").unwrap();
+        db.create_session("s2", "Session 2", "desktop").unwrap();
+
+        db.add_message("m1", "s1", "user", "hello s1", None, None).unwrap();
+        db.add_message("m2", "s2", "user", "hello s2", None, None).unwrap();
+
+        assert_eq!(db.list_messages("s1", 10).unwrap().len(), 1);
+        assert_eq!(db.list_messages("s2", 10).unwrap().len(), 1);
+
+        let deleted_count = db.clear_session_messages("s1").unwrap();
+        assert_eq!(deleted_count, 1);
+
+        // Session 1 still exists, but has 0 messages
+        assert!(db.get_session("s1").unwrap().is_some());
+        assert!(db.list_messages("s1", 10).unwrap().is_empty());
+
+        // Session 2 and its messages are completely intact
+        assert!(db.get_session("s2").unwrap().is_some());
+        let s2_msgs = db.list_messages("s2", 10).unwrap();
+        assert_eq!(s2_msgs.len(), 1);
+        assert_eq!(s2_msgs[0].content, "hello s2");
+    }
+
+    #[test]
+    fn protected_primary_and_telegram_sessions_cannot_be_deleted_or_renamed_but_can_be_cleared() {
+        let db = Database::open_in_memory().unwrap();
+        db.create_session("hud-main", "Primary HUD", "hud").unwrap();
+        db.create_session("telegram-12345", "Telegram", "telegram").unwrap();
+        db.create_session("hud-custom", "Custom", "hud").unwrap();
+
+        db.add_message("m1", "hud-main", "user", "hello hud", None, None).unwrap();
+        db.add_message("m2", "telegram-12345", "user", "hello telegram", None, None).unwrap();
+
+        assert_eq!(db.delete_session("hud-main").unwrap(), false);
+        assert!(db.get_session("hud-main").unwrap().is_some());
+
+        assert_eq!(db.delete_session("telegram-12345").unwrap(), false);
+        assert!(db.get_session("telegram-12345").unwrap().is_some());
+
+        assert_eq!(db.update_session_title("hud-main", "New").unwrap(), false);
+        assert_eq!(db.update_session_title("telegram-12345", "New").unwrap(), false);
+
+        assert_eq!(db.clear_session_messages("hud-main").unwrap(), 1);
+        assert_eq!(db.clear_session_messages("telegram-12345").unwrap(), 1);
+        assert!(db.get_session("hud-main").unwrap().is_some());
+        assert!(db.get_session("telegram-12345").unwrap().is_some());
+
+        assert_eq!(db.delete_session("hud-custom").unwrap(), true);
+        assert!(db.get_session("hud-custom").unwrap().is_none());
     }
 }

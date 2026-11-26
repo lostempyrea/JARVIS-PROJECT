@@ -8,7 +8,11 @@ use hound::{SampleFormat, WavSpec, WavWriter};
 use std::collections::VecDeque;
 use std::io::Cursor;
 
-/// Default pre-roll duration in milliseconds (1.2s so initial wake phonemes are never clipped).
+/// Compute root-mean-square (RMS) energy and dBFS for a slice of `f32` samples.
+pub fn rms_db(samples: &[f32]) -> f32 {
+    let (_, db) = compute_rms_db(samples);
+    db
+}
 pub const DEFAULT_PRE_ROLL_MS: u64 = 1200;
 
 /// Encode mono `f32` PCM samples in `[-1.0, 1.0]` into 16-bit PCM WAV bytes via `hound`.
@@ -107,6 +111,7 @@ pub struct VadProcessor {
     state: VadState,
     pre_roll: VecDeque<f32>,
     speech_buffer: Vec<f32>,
+    pub voiced_samples: usize,
     max_pre_roll_samples: usize,
     silence_threshold_samples: usize,
     min_speech_samples: usize,
@@ -123,6 +128,7 @@ impl VadProcessor {
             state: VadState::Idle,
             pre_roll: VecDeque::with_capacity(max_pre_roll_samples + 512),
             speech_buffer: Vec::new(),
+            voiced_samples: 0,
             max_pre_roll_samples,
             silence_threshold_samples,
             min_speech_samples,
@@ -149,6 +155,7 @@ impl VadProcessor {
         self.state = VadState::Idle;
         self.pre_roll.clear();
         self.speech_buffer.clear();
+        self.voiced_samples = 0;
     }
 
     /// Process a frame of 16kHz mono `f32` PCM samples.
@@ -166,6 +173,7 @@ impl VadProcessor {
                     self.speech_buffer.clear();
                     self.speech_buffer.extend(self.pre_roll.drain(..));
                     self.speech_buffer.extend_from_slice(samples);
+                    self.voiced_samples = samples.len();
                     self.state = VadState::Speaking;
                     Ok(VadEvent::SpeechStarted)
                 } else {
@@ -175,6 +183,13 @@ impl VadProcessor {
             }
             VadState::Speaking => {
                 self.speech_buffer.extend_from_slice(samples);
+                if is_speech {
+                    self.voiced_samples = self.voiced_samples.saturating_add(samples.len());
+                }
+                let max_speech_len = 30 * self.config.sample_rate.max(1) as usize;
+                if self.speech_buffer.len() >= max_speech_len {
+                    return self.finalize_utterance();
+                }
                 if !is_speech {
                     if self.silence_threshold_samples == 0
                         || samples.len() >= self.silence_threshold_samples
@@ -190,9 +205,18 @@ impl VadProcessor {
             VadState::SilenceCountdown { silence_samples } => {
                 self.speech_buffer.extend_from_slice(samples);
                 if is_speech {
+                    self.voiced_samples = self.voiced_samples.saturating_add(samples.len());
                     self.state = VadState::Speaking;
+                    let max_speech_len = 30 * self.config.sample_rate.max(1) as usize;
+                    if self.speech_buffer.len() >= max_speech_len {
+                        return self.finalize_utterance();
+                    }
                     Ok(VadEvent::None)
                 } else {
+                    let max_speech_len = 30 * self.config.sample_rate.max(1) as usize;
+                    if self.speech_buffer.len() >= max_speech_len {
+                        return self.finalize_utterance();
+                    }
                     let total_silence = silence_samples.saturating_add(samples.len());
                     if total_silence >= self.silence_threshold_samples {
                         self.finalize_utterance()
@@ -209,7 +233,7 @@ impl VadProcessor {
 
     /// Force-flush any in-progress speech segment into WAV bytes.
     pub fn flush(&mut self) -> VoiceResult<Option<Vec<u8>>> {
-        if self.state == VadState::Idle || self.speech_buffer.len() < self.min_speech_samples {
+        if self.state == VadState::Idle || self.voiced_samples < self.min_speech_samples {
             self.reset();
             return Ok(None);
         }
@@ -231,7 +255,7 @@ impl VadProcessor {
     }
 
     fn finalize_utterance(&mut self) -> VoiceResult<VadEvent> {
-        let event = if self.speech_buffer.len() >= self.min_speech_samples {
+        let event = if self.voiced_samples >= self.min_speech_samples {
             let wav = encode_wav_i16_mono(&self.speech_buffer, self.config.sample_rate)?;
             VadEvent::SpeechEnded(wav)
         } else {
@@ -285,5 +309,43 @@ impl PttController {
     /// Returns `true` when PTT is currently pressed.
     pub fn is_active(&self) -> bool {
         self.active
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vad_ignores_short_noise_spikes_despite_long_pre_roll() {
+        let config = VadConfig {
+            threshold_db: -30.0,
+            silence_duration_ms: 800,
+            min_speech_ms: 250, // 400 samples at 16kHz
+            pre_roll_ms: 1200,   // 19200 samples at 16kHz
+            sample_rate: 16000,
+        };
+        let mut vad = VadProcessor::new(config);
+
+        // Feed 1,200ms of low-level noise (-60 dB) into pre-roll
+        let noise_frame = vec![0.001f32; 800]; // about -60 dB
+        for _ in 0..24 {
+            let ev = vad.process_frame(&noise_frame).unwrap();
+            assert_eq!(ev, VadEvent::None);
+        }
+        assert_eq!(vad.pre_roll_len(), 19200);
+
+        // Feed 50ms (800 samples) of loud frame (-10 dB)
+        let loud_frame = vec![0.5f32; 800];
+        let ev = vad.process_frame(&loud_frame).unwrap();
+        assert_eq!(ev, VadEvent::SpeechStarted);
+
+        // Feed 800ms of silence (-60 dB) in chunks
+        for _ in 0..16 {
+            let ev = vad.process_frame(&noise_frame).unwrap();
+            if let VadEvent::SpeechEnded(_) = ev {
+                panic!("Expected VadEvent::None due to short voiced samples (< 250ms), but got SpeechEnded");
+            }
+        }
     }
 }

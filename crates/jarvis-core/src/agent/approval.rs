@@ -174,6 +174,25 @@ impl ApprovalBroker {
         guard.keys().cloned().collect()
     }
 
+    /// Deny and remove all currently pending approval requests belonging to `session_id`.
+    pub fn deny_all_for_session(&self, session_id: &str) -> usize {
+        let ids: Vec<String> = {
+            let guard = self.pending.lock().expect("approval broker mutex poisoned");
+            guard
+                .iter()
+                .filter(|(_, entry)| entry.request.session_id == session_id)
+                .map(|(id, _)| id.clone())
+                .collect()
+        };
+        let mut count = 0;
+        for id in ids {
+            if self.resolve(&id, ApprovalDecision::Denied) {
+                count += 1;
+            }
+        }
+        count
+    }
+
     /// Return all pending approval requests sorted by creation time.
     pub fn list_pending_requests(&self) -> Vec<ApprovalRequest> {
         let guard = self.pending.lock().expect("approval broker mutex poisoned");

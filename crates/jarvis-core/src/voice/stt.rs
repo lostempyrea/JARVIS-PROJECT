@@ -16,12 +16,48 @@ use uuid::Uuid;
 
 pub const DEFAULT_GROQ_BASE_URL: &str = "https://api.groq.com/openai/v1";
 pub const DEFAULT_GROQ_WHISPER_MODEL: &str = "whisper-large-v3-turbo";
+pub const FALLBACK_GROQ_WHISPER_MODEL: &str = "whisper-large-v3";
+
+pub fn is_rate_limit_error(err: &VoiceError) -> bool {
+    let lower = err.to_string().to_ascii_lowercase();
+    lower.contains("429")
+        || lower.contains("rate_limit_exceeded")
+        || lower.contains("too many requests")
+}
 
 pub const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 pub const DEFAULT_OPENAI_WHISPER_MODEL: &str = "whisper-1";
 
 pub const DEFAULT_LOCAL_WHISPER_BASE_URL: &str = "http://127.0.0.1:8080/v1";
 pub const DEFAULT_LOCAL_WHISPER_MODEL: &str = "whisper-1";
+
+pub fn is_allowed_en_vi_language(lang: &str) -> bool {
+    matches!(
+        lang.trim().to_ascii_lowercase().as_str(),
+        "vi" | "vie" | "vi-vn" | "vietnamese" | "en" | "eng" | "en-us" | "en-gb" | "english"
+    )
+}
+
+pub fn is_latin_or_vietnamese_text(text: &str) -> bool {
+    text.chars().all(|ch| {
+        if !ch.is_alphabetic() {
+            true
+        } else {
+            ch.is_ascii_alphabetic()
+                || ('\u{00C0}'..='\u{024F}').contains(&ch)
+                || ('\u{1E00}'..='\u{1EFF}').contains(&ch)
+        }
+    })
+}
+
+fn normalize_explicit_en_vi_language(language: Option<&str>) -> Option<&'static str> {
+    let l = language?.trim().to_ascii_lowercase();
+    match l.as_str() {
+        "vi" | "vie" | "vi-vn" | "vietnamese" => Some("vi"),
+        "en" | "eng" | "en-us" | "en-gb" | "english" => Some("en"),
+        _ => None,
+    }
+}
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -88,9 +124,8 @@ struct WhisperApiResponse {
     duration: Option<f64>,
 }
 
-/// Shared OpenAI-compatible `/audio/transcriptions` multipart uploader.
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn transcribe_openai_compatible(
+async fn transcribe_openai_compatible_once(
     client: &reqwest::Client,
     base_url: &str,
     api_key: Option<&str>,
@@ -98,7 +133,7 @@ pub(crate) async fn transcribe_openai_compatible(
     model: &str,
     audio_bytes: &[u8],
     filename: &str,
-    language: Option<&str>,
+    explicit_lang: Option<&str>,
 ) -> VoiceResult<SttResult> {
     if audio_bytes.is_empty() {
         return Err(VoiceError::Stt("Cannot transcribe empty audio payload".into()));
@@ -124,9 +159,14 @@ pub(crate) async fn transcribe_openai_compatible(
     let mut form = Form::new()
         .part("file", file_part)
         .text("model", model.to_string())
+        .text("temperature", "0")
+        .text(
+            "prompt",
+            "Chỉ nhận diện Tiếng Việt và English. Hey Jarvis, Jarvis, xin chào Jarvis, mở nhạc, kiểm tra hệ thống, mở terminal, AGY.",
+        )
         .text("response_format", "verbose_json");
 
-    if let Some(lang) = language.filter(|l| !l.trim().is_empty()) {
+    if let Some(lang) = explicit_lang.filter(|l| !l.trim().is_empty()) {
         form = form.text("language", lang.to_string());
     }
 
@@ -150,11 +190,78 @@ pub(crate) async fn transcribe_openai_compatible(
 
     Ok(SttResult {
         text: parsed.text.trim().to_string(),
-        language: parsed.language.or_else(|| language.map(str::to_string)),
+        language: parsed.language.or_else(|| explicit_lang.map(str::to_string)),
         duration_ms: parsed.duration.map(|s| (s * 1000.0).round() as u64),
         provider: provider.to_string(),
         model: model.to_string(),
     })
+}
+
+/// Shared OpenAI-compatible `/audio/transcriptions` multipart uploader.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn transcribe_openai_compatible(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: Option<&str>,
+    provider: &'static str,
+    model: &str,
+    audio_bytes: &[u8],
+    filename: &str,
+    language: Option<&str>,
+) -> VoiceResult<SttResult> {
+    let explicit = normalize_explicit_en_vi_language(language);
+    match explicit {
+        Some(lang) => {
+            let mut res = transcribe_openai_compatible_once(
+                client,
+                base_url,
+                api_key,
+                provider,
+                model,
+                audio_bytes,
+                filename,
+                Some(lang),
+            )
+            .await?;
+            if !is_latin_or_vietnamese_text(&res.text) {
+                res.text.clear();
+            }
+            Ok(res)
+        }
+        None => {
+            let res = transcribe_openai_compatible_once(
+                client,
+                base_url,
+                api_key,
+                provider,
+                model,
+                audio_bytes,
+                filename,
+                None,
+            )
+            .await?;
+            let lang_ok = res.language.as_deref().is_none_or(is_allowed_en_vi_language);
+            let script_ok = is_latin_or_vietnamese_text(&res.text);
+            if !res.text.is_empty() && (!lang_ok || !script_ok) {
+                let mut retry = transcribe_openai_compatible_once(
+                    client,
+                    base_url,
+                    api_key,
+                    provider,
+                    model,
+                    audio_bytes,
+                    filename,
+                    Some("vi"),
+                )
+                .await?;
+                if !is_latin_or_vietnamese_text(&retry.text) {
+                    retry.text.clear();
+                }
+                return Ok(retry);
+            }
+            Ok(res)
+        }
+    }
 }
 
 /// High-speed Groq Whisper STT client (`whisper-large-v3-turbo`).
@@ -207,7 +314,7 @@ impl SttBackend for GroqWhisperStt {
         filename: &str,
         language: Option<&str>,
     ) -> VoiceResult<SttResult> {
-        transcribe_openai_compatible(
+        match transcribe_openai_compatible(
             &self.client,
             &self.base_url,
             Some(&self.api_key),
@@ -218,6 +325,46 @@ impl SttBackend for GroqWhisperStt {
             language,
         )
         .await
+        {
+            Ok(res) => Ok(res),
+            Err(err) if is_rate_limit_error(&err) => {
+                let alt_model = if self.model == DEFAULT_GROQ_WHISPER_MODEL {
+                    FALLBACK_GROQ_WHISPER_MODEL
+                } else {
+                    DEFAULT_GROQ_WHISPER_MODEL
+                };
+                match transcribe_openai_compatible(
+                    &self.client,
+                    &self.base_url,
+                    Some(&self.api_key),
+                    self.provider_name(),
+                    alt_model,
+                    audio_bytes,
+                    filename,
+                    language,
+                )
+                .await
+                {
+                    Ok(res) => Ok(res),
+                    Err(err2) if is_rate_limit_error(&err2) => {
+                        tokio::time::sleep(Duration::from_millis(3200)).await;
+                        transcribe_openai_compatible(
+                            &self.client,
+                            &self.base_url,
+                            Some(&self.api_key),
+                    self.provider_name(),
+                            &self.model,
+                            audio_bytes,
+                            filename,
+                            language,
+                        )
+                        .await
+                    }
+                    Err(err2) => Err(err2),
+                }
+            }
+            Err(err) => Err(err),
+        }
     }
 }
 
@@ -271,7 +418,7 @@ impl SttBackend for OpenAiWhisperStt {
         filename: &str,
         language: Option<&str>,
     ) -> VoiceResult<SttResult> {
-        transcribe_openai_compatible(
+        match transcribe_openai_compatible(
             &self.client,
             &self.base_url,
             Some(&self.api_key),
@@ -282,6 +429,46 @@ impl SttBackend for OpenAiWhisperStt {
             language,
         )
         .await
+        {
+            Ok(res) => Ok(res),
+            Err(err) if is_rate_limit_error(&err) => {
+                let alt_model = if self.model == DEFAULT_GROQ_WHISPER_MODEL {
+                    FALLBACK_GROQ_WHISPER_MODEL
+                } else {
+                    DEFAULT_GROQ_WHISPER_MODEL
+                };
+                match transcribe_openai_compatible(
+                    &self.client,
+                    &self.base_url,
+                    Some(&self.api_key),
+                    self.provider_name(),
+                    alt_model,
+                    audio_bytes,
+                    filename,
+                    language,
+                )
+                .await
+                {
+                    Ok(res) => Ok(res),
+                    Err(err2) if is_rate_limit_error(&err2) => {
+                        tokio::time::sleep(Duration::from_millis(3200)).await;
+                        transcribe_openai_compatible(
+                            &self.client,
+                            &self.base_url,
+                            Some(&self.api_key),
+                    self.provider_name(),
+                            &self.model,
+                            audio_bytes,
+                            filename,
+                            language,
+                        )
+                        .await
+                    }
+                    Err(err2) => Err(err2),
+                }
+            }
+            Err(err) => Err(err),
+        }
     }
 }
 
@@ -352,7 +539,22 @@ impl SttBackend for LocalHttpWhisperStt {
             language,
         )
         .await
+        .map_err(|e| {
+            if is_connection_error(&e) {
+                VoiceError::Stt(format!(
+                    "Local HTTP Whisper server is unreachable at {}. Start whisper-server or switch to 'Offline: whisper.cpp Local' / 'Offline: Windows Speech'.",
+                    self.base_url
+                ))
+            } else {
+                e
+            }
+        })
     }
+}
+
+fn is_connection_error(err: &VoiceError) -> bool {
+    let s = err.to_string().to_ascii_lowercase();
+    s.contains("connect") || s.contains("connection refused") || s.contains("error sending request") || s.contains("timeout")
 }
 
 /// Offline STT backend invoking local `whisper-cli.exe` / `whisper.exe` subprocess.
@@ -423,7 +625,7 @@ impl SttBackend for OfflineWhisperCliStt {
         }
         cmd.arg("-f").arg(&temp_wav).arg("-nt").arg("-np");
 
-        if let Some(lang) = language.filter(|l| !l.trim().is_empty()) {
+        if let Some(lang) = normalize_explicit_en_vi_language(language) {
             cmd.arg("-l").arg(lang);
         }
 
@@ -441,14 +643,25 @@ impl SttBackend for OfflineWhisperCliStt {
             .await
             .map_err(|_| VoiceError::Stt("whisper-cli transcription timed out".into()))?
             .map_err(|e| {
-                VoiceError::Stt(format!(
-                    "Failed to launch '{}': {e}",
-                    self.executable_path.display()
-                ))
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    VoiceError::Stt(
+                        "Offline whisper-cli is not installed. Open the Voice tab and click 'Install Offline Whisper (~145 MB)' or select 'Offline: Windows Speech'.".into()
+                    )
+                } else {
+                    VoiceError::Stt(format!(
+                        "Failed to launch '{}': {e}",
+                        self.executable_path.display()
+                    ))
+                }
             })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("model") || stderr.contains("load") || stderr.contains("ggml") || stderr.contains("No such file") {
+                return Err(VoiceError::Stt(
+                    "Missing GGML model for whisper-cli. Open the Voice tab and click 'Install Offline Whisper (~145 MB)'.".into()
+                ));
+            }
             return Err(VoiceError::Stt(format!(
                 "whisper-cli exited with {}: {}",
                 output.status,
@@ -456,7 +669,10 @@ impl SttBackend for OfflineWhisperCliStt {
             )));
         }
 
-        let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let mut text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !is_latin_or_vietnamese_text(&text) {
+            text.clear();
+        }
         let model_label = self
             .model_path
             .as_deref()
@@ -551,5 +767,51 @@ pub fn create_stt_backend(
         other => Err(VoiceError::Config(format!(
             "Unsupported STT backend: '{other}'"
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn en_vi_language_and_script_guard_rejects_foreign_languages_and_scripts() {
+        // Test is_allowed_en_vi_language
+        assert!(is_allowed_en_vi_language("vi"));
+        assert!(is_allowed_en_vi_language("VIE"));
+        assert!(is_allowed_en_vi_language("vi-VN"));
+        assert!(is_allowed_en_vi_language("Vietnamese"));
+        assert!(is_allowed_en_vi_language("en"));
+        assert!(is_allowed_en_vi_language("ENG"));
+        assert!(is_allowed_en_vi_language("en-US"));
+        assert!(is_allowed_en_vi_language("en-GB"));
+        assert!(is_allowed_en_vi_language("English"));
+
+        assert!(!is_allowed_en_vi_language("ko"));
+        assert!(!is_allowed_en_vi_language("ja"));
+        assert!(!is_allowed_en_vi_language("zh"));
+        assert!(!is_allowed_en_vi_language("ru"));
+        assert!(!is_allowed_en_vi_language("th"));
+        assert!(!is_allowed_en_vi_language("fr"));
+        assert!(!is_allowed_en_vi_language("es"));
+        assert!(!is_allowed_en_vi_language("vi_en"));
+
+        // Test is_latin_or_vietnamese_text
+        assert!(is_latin_or_vietnamese_text("Xin chào Jarvis, mở nhạc. Hello world!"));
+        assert!(is_latin_or_vietnamese_text("Đường đi nước bước rất rõ ràng 123!?"));
+        assert!(!is_latin_or_vietnamese_text("안녕하세요 Jarvis"));
+        assert!(!is_latin_or_vietnamese_text("こんにちは Jarvis"));
+        assert!(!is_latin_or_vietnamese_text("你好 Jarvis"));
+        assert!(!is_latin_or_vietnamese_text("Привет Jarvis"));
+        assert!(!is_latin_or_vietnamese_text("สวัสดี Jarvis"));
+
+        // Test normalize_explicit_en_vi_language
+        assert_eq!(normalize_explicit_en_vi_language(Some("vi")), Some("vi"));
+        assert_eq!(normalize_explicit_en_vi_language(Some("Vietnamese")), Some("vi"));
+        assert_eq!(normalize_explicit_en_vi_language(Some("en")), Some("en"));
+        assert_eq!(normalize_explicit_en_vi_language(Some("English")), Some("en"));
+        assert_eq!(normalize_explicit_en_vi_language(Some("vi_en")), None);
+        assert_eq!(normalize_explicit_en_vi_language(Some("ko")), None);
+        assert_eq!(normalize_explicit_en_vi_language(None), None);
     }
 }
